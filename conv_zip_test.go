@@ -625,3 +625,41 @@ func TestZipNoteIsSingleLine(t *testing.T) {
 		t.Errorf("note() = %q, want %q", got, want)
 	}
 }
+
+// tzzSeekOnly hides ReaderAt, leaving only Read and Seek — the shape the zip
+// reader cannot use directly.
+type tzzSeekOnly struct{ r *bytes.Reader }
+
+func (s tzzSeekOnly) Read(p []byte) (int, error) { return s.r.Read(p) }
+func (s tzzSeekOnly) Seek(off int64, whence int) (int64, error) {
+	return s.r.Seek(off, whence)
+}
+
+// TestZipWithoutReaderAt: archive/zip needs random access, so a ReadSeeker that
+// is not a ReaderAt has to be buffered. The engine hands us a *bytes.Reader in
+// practice, but the contract is io.ReadSeeker and a container converter one
+// level up may hand us something narrower.
+func TestZipWithoutReaderAt(t *testing.T) {
+	data := tzzMakeZip(t,
+		tzzMember{name: "a.txt", body: "one\n"},
+		tzzMember{name: "b.txt", body: "two\n"},
+	)
+	c := &ZipConverter{}
+	r := tzzSeekOnly{bytes.NewReader(data)}
+	if _, ok := interface{}(r).(interface {
+		ReadAt([]byte, int64) (int, error)
+	}); ok {
+		t.Fatal("fixture still exposes ReadAt; the test proves nothing")
+	}
+	if !c.Accepts(r, StreamInfo{}, nil) {
+		t.Fatal("Accepts declined a plain archive read through a seek-only reader")
+	}
+	res, err := c.Convert(r, StreamInfo{FileName: "bundle.zip"}, &Options{engine: tzzZipEngine()})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	want := "## a.txt\n\none\n\n## b.txt\n\ntwo\n"
+	if res.Markdown != want {
+		t.Errorf("Markdown = %q, want %q", res.Markdown, want)
+	}
+}

@@ -18,7 +18,6 @@ func TestJSONArrayOfObjectsBecomesTable(t *testing.T) {
 	want := "| id | name | active | note | score |\n" +
 		"| --- | --- | --- | --- | --- |\n" +
 		"| 1 | ada | true |  |  |\n" +
-		"\n" +
 		"| 2 | grace |  |  | 9.50 |\n"
 	if res.Markdown != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", res.Markdown, want)

@@ -230,7 +230,14 @@ func exifValue(label string, t exif.ExifTag) string {
 			return trimFloat(v) + " mm"
 		}
 	}
-	return strings.TrimSpace(mdutil.Collapse(strings.Trim(t.Formatted, "\x00")))
+	// FormattedFirst, not Formatted: every EXIF value is an array, and
+	// Formatted renders a one-element array as "[400]". Each tag we render is
+	// either a scalar or a string, so the first element is the value.
+	s := t.FormattedFirst
+	if s == "" {
+		s = t.Formatted
+	}
+	return strings.TrimSpace(mdutil.Collapse(strings.Trim(s, "\x00")))
 }
 
 // exifRationalND pulls the first rational out of a tag value without
@@ -295,7 +302,12 @@ func gpsDegrees(byName map[string]exif.ExifTag, tag, refTag, negRef string) stri
 }
 
 // valueOf returns a tag's formatted text, tolerating a missing tag.
-func valueOf(t exif.ExifTag) string { return t.Formatted }
+func valueOf(t exif.ExifTag) string {
+	if t.FormattedFirst != "" {
+		return t.FormattedFirst
+	}
+	return t.Formatted
+}
 
 // trimFloat prints a float without trailing zeros, so 2.8 stays "2.8" and 50
 // stays "50" rather than "50.000000".

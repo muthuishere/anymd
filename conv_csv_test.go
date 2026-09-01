@@ -15,12 +15,9 @@ func TestCSVRaggedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
-	// NOTE: the blank line between the two data rows is mdutil.Table's current
-	// behaviour, not this converter's — see TestKnownMdutilTableBlankLineDefect.
 	want := "| name | role | city |  |\n" +
 		"| --- | --- | --- | --- |\n" +
 		"| ada | engineer |  |  |\n" +
-		"\n" +
 		"| grace | admiral | arlington | extra |\n"
 	if res.Markdown != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", res.Markdown, want)
@@ -58,7 +55,7 @@ func TestCSVSniffsDelimiterWithoutExtension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
-	want := "| a | b | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n\n| 4 | 5 | 6 |\n"
+	want := "| a | b | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n"
 	if res.Markdown != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", res.Markdown, want)
 	}
@@ -104,17 +101,14 @@ func TestCSVEmptyInput(t *testing.T) {
 	}
 }
 
-// TestKnownMdutilTableBlankLineDefect pins a defect in the SHARED emitter, not
-// in this converter: mdutil.Table writes a newline before every row after the
-// first, while writeRow already terminates its own line, so two or more data
-// rows come out separated by a blank line — which ends the table in GFM. Every
-// multi-row expectation in these converter tests encodes that behaviour, so
-// when mdutil.Table is fixed this test fails first and names the cause.
-func TestKnownMdutilTableBlankLineDefect(t *testing.T) {
+// TestMdutilTableHasNoBlankLineBetweenRows is a regression test for a defect
+// that once broke every multi-row table in the project: mdutil.Table separated
+// data rows with a blank line, which terminates the table in GFM. It is pinned
+// here, at a converter boundary, because the corruption was only ever visible
+// in converter output.
+func TestMdutilTableHasNoBlankLineBetweenRows(t *testing.T) {
 	got := mdutil.Table([]string{"a"}, [][]string{{"1"}, {"2"}})
-	if want := "| a |\n| --- |\n| 1 |\n\n| 2 |"; got != want {
-		t.Fatalf("mdutil.Table behaviour changed (likely fixed): got %q, want %q\n"+
-			"If the blank line is gone, drop the blank lines from the expectations in\n"+
-			"conv_csv_test.go, conv_xlsx_test.go, conv_json_test.go and conv_ipynb_test.go.", got, want)
+	if want := "| a |\n| --- |\n| 1 |\n| 2 |"; got != want {
+		t.Fatalf("mdutil.Table = %q, want %q", got, want)
 	}
 }

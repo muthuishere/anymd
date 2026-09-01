@@ -22,7 +22,29 @@ import (
 )
 
 // ErrUnsupported is returned when no registered converter accepted the stream.
+// Match it with errors.Is; the concrete value is an *UnsupportedError.
 var ErrUnsupported = errors.New("anymd: no converter accepted this stream")
+
+// UnsupportedError reports that nothing claimed the stream, and names every
+// converter that looked at it and declined.
+//
+// Declined is deliberately NOT part of Error(): a container converter such as
+// zip embeds a member's error text into the document it produces, and a reader
+// should not find our converter registry printed inside their markdown. The
+// list is here for callers that want it — a verbose CLI flag, a bug report —
+// without it leaking into rendered output.
+type UnsupportedError struct {
+	Ext      string
+	Mime     string
+	Declined []string
+}
+
+func (e *UnsupportedError) Error() string {
+	return fmt.Sprintf("%s (ext=%q mime=%q)", ErrUnsupported.Error(), e.Ext, e.Mime)
+}
+
+// Unwrap makes errors.Is(err, ErrUnsupported) work.
+func (e *UnsupportedError) Unwrap() error { return ErrUnsupported }
 
 type entry struct {
 	conv     Converter
@@ -123,21 +145,27 @@ func (e *Engine) ConvertFile(path string, opts *Options) (Result, error) {
 // convert is the dispatch core: rewind, ask each converter in priority order,
 // first Accepts wins.
 func (e *Engine) convert(r io.ReadSeeker, info StreamInfo, opts *Options) (Result, error) {
-	if opts == nil {
-		opts = &Options{}
+	// Copy before stamping the engine handle: convert must never hand a live
+	// engine back to a caller's Options value. Both existing call sites already
+	// copy, but relying on that would be an unwritten invariant a third call
+	// site could silently break.
+	local := Options{}
+	if opts != nil {
+		local = *opts
 	}
+	opts = &local
 	opts.engine = e
 	info = enrich(r, info)
 
-	var tried []string
+	var sniffed []string
 	for _, en := range e.entries {
 		if _, err := r.Seek(0, io.SeekStart); err != nil {
 			return Result{}, err
 		}
 		if !en.conv.Accepts(r, info, opts) {
+			sniffed = append(sniffed, en.name)
 			continue
 		}
-		tried = append(tried, en.name)
 		if _, err := r.Seek(0, io.SeekStart); err != nil {
 			return Result{}, err
 		}
@@ -149,7 +177,7 @@ func (e *Engine) convert(r io.ReadSeeker, info StreamInfo, opts *Options) (Resul
 		// fall through to a catch-all that would silently emit garbage.
 		return Result{}, fmt.Errorf("anymd: %s: %w", en.name, err)
 	}
-	return Result{}, fmt.Errorf("%w (ext=%q mime=%q)", ErrUnsupported, info.Ext(), info.NormalizedMime())
+	return Result{}, &UnsupportedError{Ext: info.Ext(), Mime: info.NormalizedMime(), Declined: sniffed}
 }
 
 // enrich fills a missing mime hint by sniffing the first 512 bytes, so a bare

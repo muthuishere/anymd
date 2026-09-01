@@ -17,10 +17,9 @@ func (r Result) String() string { return r.Markdown }
 //
 // The contract is markitdown's two-method shape:
 //
-//	Accepts — cheap, hint-and-sniff only. It MAY read from r (to sniff magic
-//	          bytes) and MUST leave r rewound to where it found it; the engine
-//	          passes an io.ReadSeeker and re-seeks to 0 before every call, so
-//	          in practice Accepts may read freely.
+//	Accepts — cheap, hint-and-sniff only. It may read from r freely to sniff
+//	          magic bytes and need not rewind: the engine seeks r back to 0
+//	          before every Accepts and before Convert.
 //	Convert — the real work. r is rewound to 0 before the call.
 //
 // Accepts must not be expensive: it runs against every registered converter.
