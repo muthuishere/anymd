@@ -109,7 +109,7 @@ func (c *MsgConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options) 
 		return Result{}, fmt.Errorf("msg too large: over %d bytes", maxMsgBytes)
 	}
 
-	props, fixed, err := msgReadProps(bytes.NewReader(raw))
+	props, fixed, err := msgReadProps(bytes.NewReader(raw), int64(len(raw)))
 	if err != nil {
 		return Result{}, err
 	}
@@ -147,7 +147,10 @@ func (c *MsgConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options) 
 //
 // Only top-level streams are read: nested storages hold attachments and
 // recipients, whose bodies are not part of this message's text.
-func msgReadProps(ra io.ReaderAt) (map[string]string, []byte, error) {
+func msgReadProps(ra io.ReaderAt, size int64) (map[string]string, []byte, error) {
+	if err := msgCheckHeader(ra, size); err != nil {
+		return nil, nil, err
+	}
 	doc, err := mscfb.New(ra)
 	if err != nil {
 		return nil, nil, err
@@ -351,4 +354,54 @@ func msgBody(props map[string]string) string {
 		}
 	}
 	return plain
+}
+
+// msgCheckHeader validates the Compound File header against the real file
+// length before mscfb parses it.
+//
+// This guards a dependency defect, not our own code: github.com/richardlehane/mscfb
+// trusts the header's sector counts and sizes its allocations from them, so a
+// 574-byte file declaring millions of sectors makes it request tens of
+// gigabytes. On Linux that is an immediate out-of-memory kill (caught by CI);
+// on macOS the allocator is lazy enough to hide it, which is why local runs
+// passed. Our own msgReadStream already clamps per-stream sizes — the blow-up
+// happens before any of that runs.
+//
+// The check is cheap and structural: a file of N bytes cannot contain more than
+// N/sectorSize sectors, so any count above that is a lie.
+func msgCheckHeader(ra io.ReaderAt, size int64) error {
+	const headerLen = 512
+	if size < headerLen {
+		return fmt.Errorf("not a compound file: %d bytes is shorter than the header", size)
+	}
+	var h [headerLen]byte
+	if _, err := ra.ReadAt(h[:], 0); err != nil {
+		return fmt.Errorf("reading compound file header: %w", err)
+	}
+
+	// Sector size is 2^sectorShift, and MS-CFB allows only 512 or 4096.
+	sectorShift := binary.LittleEndian.Uint16(h[30:32])
+	if sectorShift != 9 && sectorShift != 12 {
+		return fmt.Errorf("invalid compound file sector shift %d", sectorShift)
+	}
+	sectorSize := int64(1) << sectorShift
+
+	// The ceiling every declared count must respect.
+	maxSectors := size / sectorSize
+	for _, f := range []struct {
+		name   string
+		offset int
+	}{
+		{"directory", 40},
+		{"FAT", 44},
+		{"mini FAT", 64},
+		{"DIFAT", 72},
+	} {
+		n := int64(binary.LittleEndian.Uint32(h[f.offset : f.offset+4]))
+		if n > maxSectors {
+			return fmt.Errorf("compound file declares %d %s sectors but holds at most %d",
+				n, f.name, maxSectors)
+		}
+	}
+	return nil
 }

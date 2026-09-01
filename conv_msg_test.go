@@ -334,3 +334,42 @@ func TestMsgThroughEngine(t *testing.T) {
 		t.Fatalf("engine routed elsewhere:\n%s", res.Markdown)
 	}
 }
+
+// TestMsgHeaderGuardRejectsLyingSectorCounts is a regression test for an
+// out-of-memory found by CI on Linux (and invisible on macOS, whose allocator
+// is lazy enough to hide it). github.com/richardlehane/mscfb sizes allocations
+// from the compound-file header, so a 574-byte file declaring four billion FAT
+// sectors made it ask the runtime for tens of gigabytes.
+func TestMsgHeaderGuardRejectsLyingSectorCounts(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		offset int
+		field  string
+	}{
+		{"directory sectors", 40, "directory"},
+		{"FAT sectors", 44, "FAT"},
+		{"mini FAT sectors", 64, "mini FAT"},
+		{"DIFAT sectors", 72, "DIFAT"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := make([]byte, 574)
+			copy(raw, []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1})
+			binary.LittleEndian.PutUint16(raw[30:32], 9)
+			binary.LittleEndian.PutUint32(raw[tc.offset:tc.offset+4], 0xFFFFFFF0)
+			if err := msgCheckHeader(bytes.NewReader(raw), int64(len(raw))); err == nil {
+				t.Fatalf("accepted a header claiming 4 billion %s sectors in 574 bytes", tc.field)
+			}
+		})
+	}
+}
+
+// A sector shift outside MS-CFB's two legal values is rejected before mscfb
+// can compute a sector size from it.
+func TestMsgHeaderGuardRejectsBadSectorShift(t *testing.T) {
+	raw := make([]byte, 574)
+	copy(raw, []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1})
+	binary.LittleEndian.PutUint16(raw[30:32], 31) // 2^31-byte sectors
+	if err := msgCheckHeader(bytes.NewReader(raw), int64(len(raw))); err == nil {
+		t.Fatal("accepted an invalid sector shift")
+	}
+}
