@@ -18,6 +18,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"sync"
 )
 
 // ErrUnsupported is returned when no registered converter accepted the stream.
@@ -167,20 +168,28 @@ func enrich(r io.ReadSeeker, info StreamInfo) StreamInfo {
 	return info
 }
 
-// Default is the package-level Engine used by the package-level helpers.
-var Default = New()
+// Default returns the shared package-level Engine, built on first use.
+//
+// It is a function, not a variable, on purpose: Go initializes package-level
+// variables BEFORE it runs init(), and every converter registers itself from an
+// init(). A `var Default = New()` therefore captures an empty registry and makes
+// every package-level helper return ErrUnsupported — which is exactly the bug
+// this shape prevents. Building lazily guarantees registration has finished.
+func Default() *Engine { return defaultEngine() }
+
+var defaultEngine = sync.OnceValue(New)
 
 // Convert converts a reader with the default engine.
 func Convert(r io.Reader, info StreamInfo) (Result, error) {
-	return Default.ConvertStream(r, info, nil)
+	return Default().ConvertStream(r, info, nil)
 }
 
 // ConvertBytes converts an in-memory document with the default engine.
 func ConvertBytes(b []byte, info StreamInfo) (Result, error) {
-	return Default.ConvertBytes(b, info, nil)
+	return Default().ConvertBytes(b, info, nil)
 }
 
 // ConvertFile converts a file from disk with the default engine.
 func ConvertFile(path string) (Result, error) {
-	return Default.ConvertFile(path, nil)
+	return Default().ConvertFile(path, nil)
 }

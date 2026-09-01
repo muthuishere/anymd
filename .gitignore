@@ -1,0 +1,23 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+/anymd
+/cmd/anymd/anymd
+/dist/
+/bin/
+
+# Coverage
+*.out
+coverage.txt
+coverage.html
+cover.out
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

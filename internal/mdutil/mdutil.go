@@ -20,6 +20,10 @@ func EscapeCell(s string) string {
 // Table renders a GFM pipe table. header may be empty, in which case the first
 // row is promoted to the header. Rows shorter than the header are padded and
 // longer rows are truncated, so the table is always rectangular and valid.
+//
+// Lines are joined with exactly one newline and the result has no trailing
+// newline: a blank line between rows would terminate the table in GFM, so the
+// separator is built by joining, never by appending per-row.
 func Table(header []string, rows [][]string) string {
 	if len(header) == 0 {
 		if len(rows) == 0 {
@@ -31,20 +35,23 @@ func Table(header []string, rows [][]string) string {
 	if n == 0 {
 		return ""
 	}
-	var b strings.Builder
-	writeRow(&b, header, n)
-	b.WriteString("|")
-	for i := 0; i < n; i++ {
-		b.WriteString(" --- |")
+	lines := make([]string, 0, len(rows)+2)
+	lines = append(lines, row(header, n))
+	sep := make([]string, n)
+	for i := range sep {
+		sep[i] = "---"
 	}
+	lines = append(lines, row(sep, n))
 	for _, r := range rows {
-		b.WriteString("\n")
-		writeRow(&b, r, n)
+		lines = append(lines, row(r, n))
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return strings.Join(lines, "\n")
 }
 
-func writeRow(b *strings.Builder, cells []string, n int) {
+// row renders one pipe-delimited line of exactly n cells, padding or truncating
+// to keep the table rectangular. It returns no trailing newline.
+func row(cells []string, n int) string {
+	var b strings.Builder
 	b.WriteString("|")
 	for i := 0; i < n; i++ {
 		cell := ""
@@ -55,7 +62,7 @@ func writeRow(b *strings.Builder, cells []string, n int) {
 		b.WriteString(cell)
 		b.WriteString(" |")
 	}
-	b.WriteString("\n")
+	return b.String()
 }
 
 // Heading renders an ATX heading, clamping the level to GFM's 1..6.
