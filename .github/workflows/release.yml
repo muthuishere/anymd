@@ -1,0 +1,73 @@
+# Cut a release when a v* tag is pushed.
+#
+#   git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+#
+# Tests run FIRST and in their own job: a red test suite must never become a
+# published binary, and `needs:` is the only thing that guarantees ordering.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: vet
+        run: go vet ./...
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # -race needs cgo, so this job (and only this job) turns it back on. The
+      # shipped binaries are still built with CGO_ENABLED=0 by GoReleaser.
+      - name: test
+        run: go test ./... -race -count=1
+
+  goreleaser:
+    name: goreleaser
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release and upload the archives
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # goreleaser needs the full history for the changelog
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only needed once the `brews:` / `scoops:` blocks in .goreleaser.yaml
+          # are uncommented — GITHUB_TOKEN cannot write to another repository.
+          # An unset secret expands to "" and is harmless while they are off.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

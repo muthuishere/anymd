@@ -1,0 +1,132 @@
+# golangci-lint configuration (schema v2).
+#
+# The bar here is "finds real bugs, never nags about style". Linters that argue
+# about line length, function length or cognitive complexity are deliberately
+# absent — on a tree of parsers a long switch over record types is the correct
+# shape, and the first thing those linters cost is contributors.
+#
+# Run it exactly as CI does:
+#
+#	golangci-lint run
+version: "2"
+
+run:
+  timeout: 5m
+  # Test files are linted too: the fixtures are where a wrong index quietly
+  # makes an assertion pass for the wrong reason.
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # An unchecked error in a parser is how malformed input becomes silent
+    # garbage instead of the error CONTRACT.md rule 5 requires.
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    # The automated half of CONTRACT.md rule 7: a doc comment on every exported
+    # symbol.
+    - revive
+    # Sniffing hostile bytes means integer conversions and slice indexing;
+    # gosec flags the overflow-prone ones.
+    - gosec
+    - bodyclose
+    # gocritic is the highest-value linter here: it finds the
+    # copy-a-large-struct, append-to-the-wrong-slice and off-by-one shapes a
+    # converter review misses.
+    - gocritic
+
+  settings:
+    gocritic:
+      # diagnostic finds bugs, performance finds waste. The `style` tag is
+      # everything else gocritic has an opinion about (unnamedResult,
+      # paramTypeCombine, initClause, equalFold…) — suggestions, not defects,
+      # and exactly the nagging this config exists to avoid.
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        # Both are on by default regardless of the tag selection above, and
+        # both are pure taste: an if/else chain and a ToLower comparison are
+        # not defects.
+        - ifElseChain
+        - equalFold
+      settings:
+        rangeValCopy:
+          # Default is 128 bytes, which fires on ordinary EXIF/record structs
+          # in a loop that runs a few dozen times. Raise it to where the copy
+          # would actually matter.
+          sizeThreshold: 512
+        hugeParam:
+          sizeThreshold: 512
+
+    govet:
+      disable:
+        # `inline` proposes renaming deprecated-but-valid constants
+        # (reflect.Ptr -> reflect.Pointer). A rename is not a defect, and this
+        # analyzer's findings churn with every Go release.
+        - inline
+
+    staticcheck:
+      # SA (correctness) and S (simplification) stay on. The QF ("quickfix")
+      # class is refactoring advice — De Morgan's law, tagged switches — and
+      # the ST naming rules restate revive. Neither finds a bug.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        - -QF1001
+        - -QF1002
+        - -QF1003
+        - -QF1008
+        - -QF1012
+
+    gosec:
+      excludes:
+        # G104 duplicates errcheck.
+        - G104
+        # G301/G302/G306 want 0600/0750 on files a CLI writes for the user to
+        # read. Markdown on stdout's sibling path is not a secret, and 0600
+        # output would break every pipeline that reads it as another user.
+        - G301
+        - G302
+        - G306
+        # G304 is "opens a file named by a variable" — which is the entire job
+        # of a command-line document converter.
+        - G304
+
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            # The package is `anymd` and the types are `anymd.StreamInfo`,
+            # `anymd.Converter`. That is deliberate naming, not stutter.
+            - disableStutteringCheck
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Test helpers ignore errors on purpose: a fixture that fails to build
+      # fails the assertion on the very next line.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - gocritic
+          - bodyclose
+
+issues:
+  # Show every occurrence. A capped report hides the second instance of the
+  # bug you are about to fix.
+  max-issues-per-linter: 0
+  max-same-issues: 0

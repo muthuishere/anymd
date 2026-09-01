@@ -1,0 +1,130 @@
+name: Bug report
+description: anymd crashed, hung, or produced wrong Markdown
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report.
+
+        **If this is a security issue — a panic, a hang, or unbounded memory on
+        a crafted document — do not file it here.** Report it privately:
+        https://github.com/muthuishere/anymd/security/advisories/new
+
+  - type: dropdown
+    id: format
+    attributes:
+      label: Input format
+      description: Which converter is involved? `anymd --list` prints the registry.
+      options:
+        - csv
+        - docx
+        - epub
+        - html
+        - image
+        - ipynb
+        - json
+        - msg
+        - pdf
+        - pptx
+        - rss
+        - xls
+        - xlsx
+        - zip
+        - plaintext
+        - "not sure / dispatch picked the wrong one"
+        - "other / not a converter (CLI, library API, install)"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: anymd --version
+      description: Paste the full output. "dev" is fine, just say how you built it.
+      placeholder: |
+        anymd 0.1.0 / commit: abc1234 / go: go1.26.3
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: "macOS 15.4 arm64 · Ubuntu 24.04 amd64 · Windows 11 amd64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - install.sh
+        - Homebrew
+        - Scoop
+        - go install
+        - built from source
+        - imported as a Go library
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: >
+        Copy-paste it verbatim, flags and all — including how the input reached
+        anymd (a file argument, stdin, a URL). If you used the library, paste
+        the calling code instead.
+      render: shell
+      placeholder: |
+        anymd -t docx --title report.docx > out.md
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: >
+        Paste the actual output (or the error from stderr). If the Markdown is
+        wrong rather than missing, show the relevant few lines and what they
+        should have been.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: shareable
+    attributes:
+      label: Can you share the input file?
+      description: >
+        Please do not attach anything confidential. A small script that
+        GENERATES a file with the same problem is more useful than the file
+        itself — it reviews, it diffs, and it becomes a regression test.
+      options:
+        - "Yes — I can attach it"
+        - "Yes — I can attach a minimal reduced version"
+        - "No, it is confidential, but I can describe/reproduce its structure"
+        - "No, and I cannot reproduce it with a synthetic file"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Reproducer or file details
+      description: >
+        Attach the file (drag it in), or paste a generator, or describe what the
+        document contains — what produced it (Word 365? LibreOffice? a library?),
+        roughly how big, and which feature seems to trigger it.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I checked the [supported formats table](https://github.com/muthuishere/anymd#supported-formats) — this is not a documented omission (no OCR, no audio transcription, no image captioning, no network at convert time).
+          required: true
+        - label: I searched existing issues.
+          required: true

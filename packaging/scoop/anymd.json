@@ -1,0 +1,38 @@
+{
+    "version": "0.1.0",
+    "description": "Any document to Markdown, in pure Go. One static binary, 15 converters, no cgo.",
+    "homepage": "https://github.com/muthuishere/anymd",
+    "license": "MIT",
+    "notes": [
+        "anymd converts documents to Markdown entirely offline.",
+        "It ships no OCR, no audio transcription and no LLM captioning on purpose.",
+        "Run 'anymd --list' to see the converters in this build."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/muthuishere/anymd/releases/download/v0.1.0/anymd_0.1.0_windows_amd64.zip",
+            "hash": "REPLACE_WITH_SHA256_WINDOWS_AMD64"
+        },
+        "arm64": {
+            "url": "https://github.com/muthuishere/anymd/releases/download/v0.1.0/anymd_0.1.0_windows_arm64.zip",
+            "hash": "REPLACE_WITH_SHA256_WINDOWS_ARM64"
+        }
+    },
+    "bin": "anymd.exe",
+    "checkver": {
+        "github": "https://github.com/muthuishere/anymd"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/muthuishere/anymd/releases/download/v$version/anymd_$version_windows_amd64.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/muthuishere/anymd/releases/download/v$version/anymd_$version_windows_arm64.zip"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/checksums.txt"
+        }
+    }
+}

@@ -1,0 +1,89 @@
+# Continuous fuzzing.
+#
+# Every converter in this module is a parser pointed at bytes someone else
+# chose, and CONTRACT.md rule 5 says the one thing it may never do is panic.
+# The seed corpus runs on every CI build (a Go fuzz target is an ordinary test
+# without -fuzz); this workflow is the part that looks for inputs nobody has
+# thought of yet.
+#
+# It is scheduled rather than per-PR on purpose: a bounded fuzz run is a lottery
+# ticket, not a gate, and blocking a merge on one would teach people to re-run
+# CI until it passes.
+name: Fuzz
+
+on:
+  schedule:
+    # 03:17 UTC nightly — off the hour, where the runner queue is shorter.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Per-target fuzzing duration (Go duration, e.g. 5m)"
+        required: false
+        default: "5m"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One target per job so a crash in the xls reader does not stop the pptx
+      # reader from being fuzzed that night.
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzDocx
+          - FuzzPptx
+          - FuzzXlsx
+          - FuzzXls
+          - FuzzPdf
+          - FuzzZip
+          - FuzzEpub
+          - FuzzMsg
+          - FuzzHTML
+          - FuzzRSS
+          - FuzzImage
+          - FuzzJSON
+          - FuzzCSV
+          - FuzzIpynb
+          - FuzzEngineDispatch
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      # Restore the corpus the previous night's run grew. Without this each run
+      # starts from the committed seeds and re-derives the same shallow inputs;
+      # with it, coverage compounds.
+      - name: restore fuzz corpus cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build/fuzz
+          key: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-${{ matrix.target }}-
+
+      - name: fuzz
+        run: |
+          go test -run '^$' \
+            -fuzz '^${{ matrix.target }}$' \
+            -fuzztime '${{ github.event.inputs.fuzztime || '15m' }}' \
+            .
+
+      # A crasher is the whole point of the run, so it must survive the runner.
+      # Go writes the reproducing input to testdata/fuzz/<Target>/<hash>; that
+      # file is a complete, committable regression test on its own.
+      - name: upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 90

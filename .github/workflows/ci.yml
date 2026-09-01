@@ -1,0 +1,148 @@
+# The workflow a Go developer reads before typing `go get`.
+#
+# It is arranged so that each job proves one claim from the README, and a red
+# job names the broken claim: `test` proves it works on the three platforms,
+# `portability` proves "no cgo, cross-compiles everywhere", `lint` and
+# `coverage` prove the code is held to a standard.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # `stable` is the current release, `oldstable` the one before it: the
+        # two versions Go itself supports, so this is the real support window.
+        go: [stable, oldstable]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      # Run gofmt first: it is the cheapest check and the most common PR nit.
+      # Printing the offending files (and the diff) turns "CI is red" into a
+      # one-command fix.
+      - name: gofmt
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race is the point of running tests on three platforms: the batch path
+      # in cmd/anymd is a worker pool, and a data race there would otherwise
+      # only show up under load in someone else's pipeline.
+      # Windows is here on purpose: this project claims to run anywhere Go
+      # cross-compiles, and the CLI's path handling is the likeliest breakage.
+      - name: go test -race
+        run: go test ./... -race -count=1
+
+      - name: go build
+        run: go build ./...
+
+  portability:
+    # The central claim of the README, mechanised: no cgo, and a binary for
+    # every platform people actually deploy to. If cgo ever creeps in through a
+    # dependency, CGO_ENABLED=0 makes this job go red on the commit that did it
+    # rather than in a user's scratch container six months later.
+    name: no-cgo + cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: build with cgo disabled
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./...
+
+      - name: cross-compile
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            export GOOS="${target%/*}" GOARCH="${target#*/}"
+            echo "--- $GOOS/$GOARCH"
+            go build ./...
+            go build -o /dev/null ./cmd/anymd
+          done
+
+  lint:
+    # Deliberately a single job, not a matrix entry: the linters are
+    # platform-independent, and running them six times would only make CI slow.
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          # Configuration lives in .golangci.yml, in the repo, so `golangci-lint
+          # run` locally reproduces CI exactly.
+          args: --timeout=5m
+
+  coverage:
+    # Also single: coverage from ubuntu/stable is the number worth publishing,
+    # and uploading six near-identical reports tells nobody anything.
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: go test -coverprofile
+        run: go test ./... -count=1 -covermode=atomic -coverprofile=coverage.out
+
+      - name: coverage summary
+        run: go tool cover -func=coverage.out | tail -n 1
+
+      - uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.out
+          # A public repo uploads without a token; the secret is used when it
+          # exists so a fork or a later private mirror keeps working.
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # Coverage is a signal, not a gate. A flaky uploader must never be the
+          # reason a correct PR cannot merge.
+          fail_ci_if_error: false

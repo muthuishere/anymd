@@ -1,0 +1,92 @@
+name: Feature request
+description: A new format, flag, or library capability
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you write: `anymd` has **deliberate omissions**, and requests for
+        them will be closed with a pointer here rather than debated again.
+
+        - **No OCR** — a scanned PDF returns `ErrNoTextLayer`, not invented text.
+        - **No audio or video transcription.**
+        - **No LLM image captioning.**
+        - **No network access at convert time.**
+
+        Each would mean a model, a service, an API key, or a native dependency,
+        and would break "one static binary that works offline". Wrap `anymd` in
+        your own pipeline where you control the cost and the data boundary.
+
+        The other hard constraint: **pure Go, `CGO_ENABLED=0`.** Anything
+        needing cgo or an external binary is out of scope by construction.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of request is this?
+      options:
+        - A new format / converter
+        - A new CLI flag or behaviour
+        - A library API addition
+        - Better output for a format already supported
+        - Packaging / install
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you actually trying to do, and where does anymd stop you today?
+        Describe the situation, not the solution — the best fix is often not the
+        one you had in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+      description: >
+        For a new format: which extension(s), and what should the Markdown look
+        like? For a flag: the spelling and the default. Show a before/after if
+        you can.
+    validations:
+      required: true
+
+  - type: input
+    id: library
+    attributes:
+      label: Pure-Go library that can parse it (new formats only)
+      description: >
+        `go.mod` is pinned and closed — see CONTRIBUTING.md. If a new dependency
+        is needed, name it and confirm it builds with CGO_ENABLED=0 and has no
+        cgo in its own dependency graph.
+      placeholder: "github.com/example/parser — pure Go, no cgo, MIT"
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you are doing instead today
+      description: The workaround, and why it is not good enough.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Scope check
+      options:
+        - label: This does not require OCR, transcription, an LLM, or a network call at convert time.
+          required: true
+        - label: This does not require cgo or shelling out to an external binary.
+          required: true
+        - label: I searched existing issues.
+          required: true
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Would you like to implement it?
+      options:
+        - label: I am willing to open a PR (CONTRACT.md has the rules for in-tree converters).

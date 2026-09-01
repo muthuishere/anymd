@@ -1,0 +1,208 @@
+# GoReleaser v2 configuration for anymd.
+#
+#   goreleaser check                 # validate this file
+#   goreleaser build --snapshot --clean   # local cross-compile, no publish
+#   goreleaser release --clean       # real release (CI does this on a v* tag)
+#
+# The product promise is a single static binary, so every build here is
+# CGO_ENABLED=0 and -trimpath, matching the Makefile exactly.
+version: 2
+
+project_name: anymd
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: anymd
+    main: ./cmd/anymd
+    binary: anymd
+    env:
+      # Not an optimization — a cgo build would break cross-compilation and
+      # the "drop it in a scratch container" claim.
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # Stamp the build vars that ACTUALLY EXIST in cmd/anymd/main.go:
+    #
+    #   var (
+    #       version = "dev"
+    #       commit  = ""
+    #   )
+    #
+    # There is deliberately NO `date` variable there, so `-X main.date=...` is
+    # omitted: the Go linker silently ignores -X for a symbol that does not
+    # exist, which would look like it worked while doing nothing. If a `date`
+    # var is ever added to main.go, add `-X main.date={{.CommitDate}}` here.
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.FullCommit}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - "386"
+    ignore:
+      # Go supports these, but nobody ships them and they only add noise to the
+      # release page. 386 is linux-only here.
+      - goos: darwin
+        goarch: "386"
+      - goos: windows
+        goarch: "386"
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+# One fat macOS binary alongside the per-arch ones, so `install.sh` and
+# Homebrew can both work and a user who copies the wrong file still wins.
+universal_binaries:
+  - id: anymd-macos
+    ids:
+      - anymd
+    name_template: anymd
+    replace: false
+
+archives:
+  - id: default
+    ids:
+      - anymd
+      - anymd-macos
+    # anymd_0.1.0_darwin_arm64.tar.gz / anymd_0.1.0_windows_amd64.zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - CONTRACT.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Converters
+      regexp: '^.*?(conv|converters?)(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Bug fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Performance
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: Security
+      regexp: '^.*?sec(urity)?(\([[:word:]]+\))??!?:.+$'
+      order: 4
+    - title: Documentation
+      regexp: '^.*?docs?(\([[:word:]]+\))??!?:.+$'
+      order: 5
+    - title: Other
+      order: 99
+  filters:
+    exclude:
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: muthuishere
+    name: anymd
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Install
+
+    ```sh
+    # Homebrew (macOS / Linux)
+    brew install muthuishere/tap/anymd
+
+    # Anywhere with a shell
+    curl -sSfL https://raw.githubusercontent.com/muthuishere/anymd/main/install.sh | sh
+
+    # Scoop (Windows)
+    scoop bucket add muthuishere https://github.com/muthuishere/scoop-bucket
+    scoop install anymd
+
+    # Go
+    go install github.com/muthuishere/anymd/cmd/anymd@latest
+    ```
+
+    Verify a downloaded archive against `checksums.txt` before running it.
+
+# ---------------------------------------------------------------------------
+# PACKAGE MANAGERS — NOT YET WIRED UP.
+#
+# Both blocks below are commented out ON PURPOSE. GoReleaser FAILS THE WHOLE
+# RELEASE if it cannot push to the tap/bucket repo, so leaving them enabled
+# before the prerequisites exist would turn every `git tag` into a red build.
+#
+# Before uncommenting, a maintainer must create BOTH of these:
+#
+#   1. github.com/muthuishere/homebrew-tap   (public repo, needs a Formula/ dir)
+#   2. github.com/muthuishere/scoop-bucket   (public repo, needs a bucket/ dir)
+#
+# ...and add ONE repository secret to github.com/muthuishere/anymd:
+#
+#   HOMEBREW_TAP_GITHUB_TOKEN — a classic PAT (or fine-grained token) with
+#   `contents: write` on BOTH repos above. The release workflow's built-in
+#   GITHUB_TOKEN cannot write to another repository, which is why a separate
+#   secret is required.
+#
+# See packaging/README.md for the full runbook. Until then, the hand-written
+# packaging/homebrew/anymd.rb and packaging/scoop/anymd.json are the templates.
+# ---------------------------------------------------------------------------
+#
+# brews:
+#   - name: anymd
+#     ids:
+#       - default
+#     repository:
+#       owner: muthuishere
+#       name: homebrew-tap
+#       branch: main
+#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#     directory: Formula
+#     homepage: https://github.com/muthuishere/anymd
+#     description: "Any document to Markdown, in pure Go. One static binary, 15 converters."
+#     license: MIT
+#     commit_author:
+#       name: goreleaserbot
+#       email: bot@goreleaser.com
+#     test: |
+#       assert_match "anymd", shell_output("#{bin}/anymd --version")
+#       (testpath/"t.csv").write("a,b\n1,2\n")
+#       assert_match "| a | b |", shell_output("#{bin}/anymd #{testpath}/t.csv")
+#
+# scoops:
+#   - name: anymd
+#     ids:
+#       - default
+#     repository:
+#       owner: muthuishere
+#       name: scoop-bucket
+#       branch: main
+#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#     directory: bucket
+#     homepage: https://github.com/muthuishere/anymd
+#     description: "Any document to Markdown, in pure Go. One static binary, 15 converters."
+#     license: MIT
