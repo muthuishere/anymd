@@ -2,9 +2,11 @@ package anymd
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	xlslib "github.com/extrame/xls"
 	"github.com/richardlehane/mscfb"
@@ -183,7 +185,7 @@ func (c *XLSConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options) 
 		return Result{}, fmt.Errorf("workbook too large: over %d bytes", maxXLSBytes)
 	}
 
-	wb, err := xlslib.OpenReader(bytes.NewReader(raw), "utf-8")
+	wb, err := openWorkbookGuarded(raw)
 	if err != nil {
 		return Result{}, err
 	}
@@ -308,4 +310,56 @@ func xlsRowCells(row *xlslib.Row) []string {
 		cells[c] = row.Col(c)
 	}
 	return cells
+}
+
+// ErrParseTimeout means the underlying parser did not finish within
+// xlsParseBudget and was abandoned. It is distinct from a malformed-file error:
+// the input may be perfectly valid and merely pathological.
+var ErrParseTimeout = errors.New("anymd: parser exceeded its time budget")
+
+// xlsParseBudget bounds a single OpenReader call. Chosen to be far above any
+// legitimate workbook (the largest in our corpus parses in milliseconds) and far
+// below a caller's patience.
+const xlsParseBudget = 10 * time.Second
+
+// openWorkbookGuarded runs the BIFF parser under a wall-clock budget.
+//
+// This exists because of a real, fuzzer-found defect, and the shape is
+// deliberate. github.com/extrame/xls can enter a non-terminating loop on a
+// crafted workbook (see testdata/fuzz/FuzzXls/29ed7f0c0d49e0d5). A loop is not
+// a panic, so the recover() above cannot catch it: without this guard a single
+// uploaded file wedges the calling goroutine forever, which for a server is a
+// denial of service.
+//
+// Go cannot kill a goroutine, so the abandoned parse keeps running until it
+// finishes or the process exits. That leak is the price of not blocking the
+// caller, and it is bounded: the input is already capped at maxXLSBytes, and
+// the parser holds no locks the rest of the package needs. Returning promptly
+// with an error is strictly better than never returning at all.
+func openWorkbookGuarded(raw []byte) (wb *xlslib.WorkBook, err error) {
+	type result struct {
+		wb  *xlslib.WorkBook
+		err error
+	}
+	done := make(chan result, 1) // buffered: the abandoned goroutine must not block forever
+
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				done <- result{nil, fmt.Errorf("malformed workbook: %v", p)}
+			}
+		}()
+		w, e := xlslib.OpenReader(bytes.NewReader(raw), "utf-8")
+		done <- result{w, e}
+	}()
+
+	timer := time.NewTimer(xlsParseBudget)
+	defer timer.Stop()
+
+	select {
+	case r := <-done:
+		return r.wb, r.err
+	case <-timer.C:
+		return nil, ErrParseTimeout
+	}
 }
