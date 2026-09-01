@@ -250,7 +250,13 @@ func runStdin(engine *anymd.Engine, cfg *config, opts *anymd.Options, stdout, st
 		dst = filepath.Join(cfg.outdir, "stdin"+cfg.ext)
 	}
 	if dst == "" {
-		io.WriteString(stdout, body)
+		// A short write to stdout is real (a closed pipe, a full disk) and must
+		// not be reported as success — `anymd big.pdf | head` should not exit 0
+		// while having lost the document.
+		if _, err := io.WriteString(stdout, body); err != nil {
+			fmt.Fprintf(stderr, "anymd: writing to stdout: %v\n", err)
+			return exitFail
+		}
 		return exitOK
 	}
 	if err := writeFile(dst, body); err != nil {

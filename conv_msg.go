@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -330,7 +331,13 @@ func msgFixedTime(fixed []byte, id string) (time.Time, bool) {
 func filetimeToTime(ft uint64) (time.Time, bool) {
 	const ticksPerSecond = 10000000
 	const epochDelta = 11644473600 // seconds between 1601-01-01 and 1970-01-01
-	secs := int64(ft/ticksPerSecond) - epochDelta
+	// ft is read straight from the file, so ft/ticksPerSecond can exceed
+	// MaxInt64 and wrap to a negative "date". Reject before converting.
+	ticks := ft / ticksPerSecond
+	if ticks > math.MaxInt64 {
+		return time.Time{}, false
+	}
+	secs := int64(ticks) - epochDelta
 	if secs < -62135596800 || secs > 253402300799 { // year 1 .. year 9999
 		return time.Time{}, false
 	}

@@ -1,0 +1,15 @@
+# Go tooling (gofmt, golangci-lint) requires LF. Without this, a Windows
+# checkout converts every file to CRLF and `gofmt -l .` reports the entire
+# tree as unformatted — which is exactly how CI failed on windows-latest.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.epub binary
+*.msg binary
+*.xls binary
+*.zip binary
+testdata/fuzz/** -text
