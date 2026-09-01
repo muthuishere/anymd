@@ -212,3 +212,151 @@ func TestPptxMalformedIsAnErrorNotAPanic(t *testing.T) {
 		t.Error("expected an error for a truncated zip")
 	}
 }
+
+// A p:pic contributes its alt text as an image, in shape order.
+func TestPptxPictureAltText(t *testing.T) {
+	pic := func(descr, name string) string {
+		return `<p:pic><p:nvPicPr><p:cNvPr id="5" name="` + name + `" descr="` + descr + `"/>` +
+			`<p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId3"/></p:blipFill>` +
+			`<p:spPr/></p:pic>`
+	}
+	slide := pptxSldHeader +
+		pptxShapeXML("title", "Figures") +
+		pic("The first page of the [paper].&#xA;44bf7d06", "Picture 4") +
+		pic("", "Picture 9") +
+		pic("", "") +
+		pptxSldFooter
+
+	got := convertPptx(t, pptxFixture(t, 1, map[string]string{"ppt/slides/slide1.xml": slide}))
+	want := "## Slide 1\n\n" +
+		"### Figures\n\n" +
+		"![The first page of the paper . 44bf7d06]()\n\n" +
+		"![Picture 9]()\n"
+	if got.Markdown != want {
+		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	}
+}
+
+const pptxChartXML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+	`<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"` +
+	` xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+	`<c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Revenue by year</a:t></a:r></a:p></c:rich></c:tx></c:title>` +
+	`<c:plotArea>` +
+	`<c:barChart>` +
+	`<c:ser><c:idx val="0"/>` +
+	`<c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:pt idx="0"><c:v>Series 1</c:v></c:pt></c:strCache></c:strRef></c:tx>` +
+	`<c:cat><c:numRef><c:numCache><c:ptCount val="3"/>` +
+	`<c:pt idx="0"><c:v>2001</c:v></c:pt><c:pt idx="1"><c:v>2002</c:v></c:pt><c:pt idx="2"><c:v>2003</c:v></c:pt>` +
+	`</c:numCache></c:numRef></c:cat>` +
+	`<c:val><c:numRef><c:numCache><c:ptCount val="3"/>` +
+	`<c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt>` +
+	`</c:numCache></c:numRef></c:val>` +
+	`</c:ser>` +
+	`<c:ser><c:idx val="1"/>` +
+	`<c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Series 2</c:v></c:pt></c:strCache></c:strRef></c:tx>` +
+	`<c:val><c:numRef><c:numCache>` +
+	`<c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt><c:pt idx="2"><c:v>3</c:v></c:pt>` +
+	`</c:numCache></c:numRef></c:val>` +
+	`</c:ser>` +
+	`</c:barChart>` +
+	// An axis title must NOT be mistaken for the chart title.
+	`<c:valAx><c:title><c:tx><c:rich><a:p><a:r><a:t>Axis title</a:t></a:r></a:p></c:rich></c:tx></c:valAx>` +
+	`</c:plotArea></c:chart></c:chartSpace>`
+
+func pptxChartSlide(relID string) string {
+	return pptxSldHeader +
+		pptxShapeXML("title", "A chart") +
+		`<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="4" name="Chart 3"/></p:nvGraphicFramePr>` +
+		`<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">` +
+		`<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="` + relID + `"/>` +
+		`</a:graphicData></a:graphic></p:graphicFrame>` +
+		pptxSldFooter
+}
+
+func pptxChartRels() string {
+	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"` +
+		` Target="../charts/chart1.xml"/></Relationships>`
+}
+
+func TestPptxChartTitleAndSeriesTable(t *testing.T) {
+	got := convertPptx(t, pptxFixture(t, 1, map[string]string{
+		"ppt/slides/slide1.xml":            pptxChartSlide("rId2"),
+		"ppt/slides/_rels/slide1.xml.rels": pptxChartRels(),
+		"ppt/charts/chart1.xml":            pptxChartXML,
+	}))
+	want := "## Slide 1\n\n" +
+		"### A chart\n\n" +
+		"### Chart: Revenue by year\n\n" +
+		"| Category | Series 1 | Series 2 |\n" +
+		"| --- | --- | --- |\n" +
+		"| 2001 | 10 | 1 |\n" +
+		"| 2002 |  | 2 |\n" +
+		"| 2003 | 30 | 3 |\n"
+	if got.Markdown != want {
+		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	}
+}
+
+// A chart whose relationship, target part, or cache is missing must degrade,
+// never fail the deck.
+func TestPptxChartDegradesWhenUnreachable(t *testing.T) {
+	cases := map[string]map[string]string{
+		"dangling rel id": {
+			"ppt/slides/slide1.xml":            pptxChartSlide("rId404"),
+			"ppt/slides/_rels/slide1.xml.rels": pptxChartRels(),
+			"ppt/charts/chart1.xml":            pptxChartXML,
+		},
+		"missing chart part": {
+			"ppt/slides/slide1.xml":            pptxChartSlide("rId2"),
+			"ppt/slides/_rels/slide1.xml.rels": pptxChartRels(),
+		},
+		"no rels part at all": {
+			"ppt/slides/slide1.xml": pptxChartSlide("rId2"),
+		},
+	}
+	for name, parts := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := convertPptx(t, pptxFixture(t, 1, parts))
+			if got.Markdown != "## Slide 1\n\n### A chart\n" {
+				t.Errorf("got %q", got.Markdown)
+			}
+		})
+	}
+}
+
+// A chart with a title but no readable cache keeps the title.
+func TestPptxChartWithoutCacheKeepsTitle(t *testing.T) {
+	bare := `<?xml version="1.0"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"` +
+		` xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+		`<c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Bare</a:t></a:r></a:p></c:rich></c:tx></c:title></c:chart></c:chartSpace>`
+	got := convertPptx(t, pptxFixture(t, 1, map[string]string{
+		"ppt/slides/slide1.xml":            pptxChartSlide("rId2"),
+		"ppt/slides/_rels/slide1.xml.rels": pptxChartRels(),
+		"ppt/charts/chart1.xml":            bare,
+	}))
+	want := "## Slide 1\n\n### A chart\n\n### Chart: Bare\n"
+	if got.Markdown != want {
+		t.Errorf("got %q, want %q", got.Markdown, want)
+	}
+}
+
+// A hostile c:pt index must not be used to size a slice.
+func TestPptxChartHugePointIndexIsIgnored(t *testing.T) {
+	evil := `<?xml version="1.0"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"` +
+		` xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart>` +
+		`<c:ser><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>S</c:v></c:pt></c:strCache></c:strRef></c:tx>` +
+		`<c:val><c:numRef><c:numCache><c:pt idx="4000000000"><c:v>9</c:v></c:pt>` +
+		`<c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>` +
+		`</c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>`
+	got := convertPptx(t, pptxFixture(t, 1, map[string]string{
+		"ppt/slides/slide1.xml":            pptxChartSlide("rId2"),
+		"ppt/slides/_rels/slide1.xml.rels": pptxChartRels(),
+		"ppt/charts/chart1.xml":            evil,
+	}))
+	want := "## Slide 1\n\n### A chart\n\n### Chart\n\n| Category | S |\n| --- | --- |\n|  | 1 |\n"
+	if got.Markdown != want {
+		t.Errorf("got %q, want %q", got.Markdown, want)
+	}
+}

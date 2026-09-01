@@ -257,3 +257,29 @@ func TestDocxIgnoresTraversingPartNames(t *testing.T) {
 		t.Errorf("traversing name leaked: %q", got.Markdown)
 	}
 }
+
+// An inline image contributes its authored alt text, split out of the run so it
+// never lands inside the run's emphasis markers.
+func TestDocxInlineImageAltText(t *testing.T) {
+	drawing := func(descr, name string) string {
+		return `<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+			`<wp:extent cx="100" cy="100"/><wp:docPr id="1" name="` + name + `" descr="` + descr + `"/>` +
+			`</wp:inline></w:drawing>`
+	}
+	body := `<w:p>` +
+		`<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">before </w:t>` +
+		drawing("A chart of&#xA;quarterly [revenue]", "Picture 4") +
+		`<w:t xml:space="preserve"> after</w:t></w:r></w:p>` +
+		// descr absent: fall back to the shape name.
+		`<w:p><w:r>` + drawing("", "Picture 9") + `</w:r></w:p>` +
+		// Neither: emit nothing at all rather than an empty image.
+		`<w:p><w:r><w:t>plain</w:t>` + drawing("", "") + `</w:r></w:p>`
+
+	got := convertDocx(t, docxFixture(t, body, nil))
+	want := "**before** ![A chart of quarterly revenue]() **after**\n\n" +
+		"![Picture 9]()\n\n" +
+		"plain\n"
+	if got.Markdown != want {
+		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	}
+}

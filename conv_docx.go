@@ -255,17 +255,28 @@ func (dc *docxCtx) paragraph(d *xml.Decoder) (docxPara, error) {
 					return p, err
 				}
 			case "r":
-				seg, err := dc.run(d)
+				segs, err := dc.run(d)
 				if err != nil {
 					return p, err
 				}
-				p.segs = append(p.segs, seg)
+				p.segs = append(p.segs, segs...)
 			case "hyperlink":
 				seg, err := dc.hyperlink(d, t)
 				if err != nil {
 					return p, err
 				}
 				p.segs = append(p.segs, seg)
+			case "drawing":
+				alt, err := docxDrawingAlt(d)
+				if err != nil {
+					return p, err
+				}
+				if alt != "" {
+					// Rendered without a destination: the media part is not
+					// extracted, but the authored description is often the only
+					// prose describing the figure.
+					p.segs = append(p.segs, docxSeg{raw: "![" + alt + "]()"})
+				}
 			default:
 				// Descend. Revision marks (w:ins), structured document tags and
 				// smart tags all wrap runs we still want, and descending costs
@@ -320,10 +331,25 @@ func (dc *docxCtx) paraProps(d *xml.Decoder, p *docxPara) error {
 	return nil
 }
 
-// run consumes one w:r and returns its text plus its bold/italic state.
-func (dc *docxCtx) run(d *xml.Decoder) (docxSeg, error) {
-	var seg docxSeg
-	var sb strings.Builder
+// run consumes one w:r and returns its content as segments.
+//
+// It returns a slice rather than a single segment because a run may embed a
+// w:drawing between two stretches of text, and an image must not end up inside
+// the run's emphasis markers.
+func (dc *docxCtx) run(d *xml.Decoder) ([]docxSeg, error) {
+	var (
+		out  []docxSeg
+		bold bool
+		ital bool
+		sb   strings.Builder
+	)
+	flush := func() {
+		if sb.Len() == 0 {
+			return
+		}
+		out = append(out, docxSeg{text: sb.String(), bold: bold, ital: ital})
+		sb.Reset()
+	}
 	depth := 1
 	for depth > 0 {
 		tok, err := d.Token()
@@ -331,7 +357,7 @@ func (dc *docxCtx) run(d *xml.Decoder) (docxSeg, error) {
 			break
 		}
 		if err != nil {
-			return seg, err
+			return nil, err
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
@@ -339,14 +365,14 @@ func (dc *docxCtx) run(d *xml.Decoder) (docxSeg, error) {
 			case "rPr":
 				b, i, err := runProps(d)
 				if err != nil {
-					return seg, err
+					return nil, err
 				}
-				seg.bold, seg.ital = b, i
+				bold, ital = b, i
 			case "t":
 				preserve := ooxml.Attr(t, "space") == "preserve"
 				s, err := ooxml.TextOf(d)
 				if err != nil {
-					return seg, err
+					return nil, err
 				}
 				if !preserve {
 					s = strings.TrimSpace(s)
@@ -354,18 +380,30 @@ func (dc *docxCtx) run(d *xml.Decoder) (docxSeg, error) {
 				sb.WriteString(s)
 			case "br", "cr":
 				if err := ooxml.SkipElement(d); err != nil && err != io.EOF {
-					return seg, err
+					return nil, err
 				}
 				sb.WriteString("\n")
 			case "tab":
 				if err := ooxml.SkipElement(d); err != nil && err != io.EOF {
-					return seg, err
+					return nil, err
 				}
 				sb.WriteString(" ")
+			case "drawing":
+				alt, err := docxDrawingAlt(d)
+				if err != nil {
+					return nil, err
+				}
+				if alt != "" {
+					flush()
+					// Rendered without a destination: the media part is not
+					// extracted, but the authored description is often the only
+					// prose describing the figure.
+					out = append(out, docxSeg{raw: "![" + alt + "]()"})
+				}
 			case "delText":
 				// Deleted text from a tracked change is not part of the document.
 				if err := ooxml.SkipElement(d); err != nil && err != io.EOF {
-					return seg, err
+					return nil, err
 				}
 			default:
 				if err := ooxml.SkipElement(d); err != nil {
@@ -373,15 +411,15 @@ func (dc *docxCtx) run(d *xml.Decoder) (docxSeg, error) {
 						depth = 0
 						continue
 					}
-					return seg, err
+					return nil, err
 				}
 			}
 		case xml.EndElement:
 			depth--
 		}
 	}
-	seg.text = sb.String()
-	return seg, nil
+	flush()
+	return out, nil
 }
 
 // runProps consumes a w:rPr and reports the toggles we render.
@@ -434,11 +472,11 @@ func (dc *docxCtx) hyperlink(d *xml.Decoder, se xml.StartElement) (docxSeg, erro
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if t.Name.Local == "r" {
-				seg, err := dc.run(d)
+				rs, err := dc.run(d)
 				if err != nil {
 					return docxSeg{}, err
 				}
-				segs = append(segs, seg)
+				segs = append(segs, rs...)
 				continue
 			}
 			depth++
@@ -782,4 +820,59 @@ func docxCoreTitle(data []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(props.Title)
+}
+
+// docxDrawingAlt consumes a w:drawing and returns the normalized alt text of
+// its wp:docPr, falling back to the shape name.
+func docxDrawingAlt(d *xml.Decoder) (string, error) {
+	alt := ""
+	depth := 1
+	for depth > 0 {
+		tok, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "docPr" && alt == "" {
+				alt = ooxmlAltText(ooxml.Attr(t, "descr"), ooxml.Attr(t, "name"))
+				if err := ooxml.SkipElement(d); err != nil {
+					if err == io.EOF {
+						depth = 0
+						continue
+					}
+					return "", err
+				}
+				continue
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	return alt, nil
+}
+
+// ooxmlAltText normalizes an authored image description into something safe to
+// put between the brackets of a Markdown image: descr wins over name, the
+// bracket characters that would terminate the label early are neutralized, and
+// the embedded newlines Word writes into descr collapse to single spaces.
+//
+// Shared by the docx and pptx converters so a figure reads the same either way.
+func ooxmlAltText(descr, name string) string {
+	alt := descr
+	if strings.TrimSpace(alt) == "" {
+		alt = name
+	}
+	alt = strings.Map(func(r rune) rune {
+		switch r {
+		case '\r', '\n', '[', ']':
+			return ' '
+		}
+		return r
+	}, alt)
+	return mdutil.Collapse(alt)
 }
