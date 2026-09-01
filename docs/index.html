@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>anymd — any document to Markdown, in pure Go</title>
+<meta name="description" content="A pure-Go library and CLI that converts PDF, Word, Excel, PowerPoint, EPUB and more to Markdown. No cgo, no Python, no native library.">
+<style>
+:root{
+  --bg:#fbfbfa; --fg:#1a1a19; --muted:#5c5c58; --line:#e3e3df;
+  --accent:#2f6f4f; --code-bg:#f4f4f1; --card:#fff;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#16171a; --fg:#e8e8e6; --muted:#a0a09c; --line:#2c2e33;
+    --accent:#7fc7a0; --code-bg:#1f2126; --card:#1c1e22;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:760px;margin:0 auto;padding:0 24px}
+header{padding:72px 0 40px;border-bottom:1px solid var(--line)}
+h1{font-size:44px;line-height:1.1;margin:0 0 12px;letter-spacing:-.02em}
+.tag{font-size:19px;color:var(--muted);margin:0 0 28px;max-width:58ch}
+.badges{display:flex;flex-wrap:wrap;gap:8px}
+.badges img{height:20px}
+h2{font-size:24px;margin:48px 0 14px;letter-spacing:-.01em}
+h3{font-size:17px;margin:28px 0 8px}
+p{margin:0 0 16px;max-width:68ch}
+a{color:var(--accent)}
+code{background:var(--code-bg);padding:2px 5px;border-radius:4px;font-size:.9em;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre{background:var(--code-bg);padding:16px;border-radius:8px;overflow-x:auto;
+  border:1px solid var(--line);margin:0 0 18px}
+pre code{background:none;padding:0;font-size:13.5px;line-height:1.55}
+.tw{overflow-x:auto;margin:0 0 20px}
+table{border-collapse:collapse;width:100%;font-size:14.5px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;white-space:nowrap}
+td:first-child{white-space:nowrap;font-weight:500}
+.muted{color:var(--muted)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.card h3{margin:0 0 6px;font-size:15px}
+.card p{margin:0;font-size:14px;color:var(--muted)}
+.note{border-left:3px solid var(--accent);padding:2px 0 2px 16px;margin:0 0 20px;color:var(--muted)}
+footer{margin:64px 0 48px;padding-top:24px;border-top:1px solid var(--line);
+  color:var(--muted);font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>anymd</h1>
+  <p class="tag">Convert any document to Markdown — a pure-Go library and CLI.
+  No cgo. No Python. No native library to ship.</p>
+  <div class="badges">
+    <a href="https://pkg.go.dev/github.com/muthuishere/anymd"><img src="https://pkg.go.dev/badge/github.com/muthuishere/anymd.svg" alt="Go Reference"></a>
+    <a href="https://github.com/muthuishere/anymd/actions"><img src="https://github.com/muthuishere/anymd/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://goreportcard.com/report/github.com/muthuishere/anymd"><img src="https://goreportcard.com/badge/github.com/muthuishere/anymd" alt="Go Report Card"></a>
+    <a href="https://github.com/muthuishere/anymd/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"></a>
+  </div>
+</header>
+
+<h2>Install</h2>
+<pre><code># CLI
+go install github.com/muthuishere/anymd/cmd/anymd@latest
+
+# or, without Go
+curl -sSfL https://raw.githubusercontent.com/muthuishere/anymd/main/install.sh | sh
+
+# library
+go get github.com/muthuishere/anymd</code></pre>
+
+<h2>Use it</h2>
+<pre><code>$ anymd report.docx &gt; report.md
+$ anymd *.pdf --outdir ./md
+$ cat data.xlsx | anymd -t xlsx
+$ anymd https://example.com/post.html</code></pre>
+
+<pre><code>md, err := anymd.ConvertFile("report.docx")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(md.Markdown)</code></pre>
+
+<h2>Why this one</h2>
+<div class="cards">
+  <div class="card"><h3>One static binary</h3>
+    <p>Builds with <code>CGO_ENABLED=0</code> and cross-compiles anywhere Go does. Nothing to install alongside it.</p></div>
+  <div class="card"><h3>Library first</h3>
+    <p>The CLI is a thin wrapper. Embed the converter in your own service without shelling out.</p></div>
+  <div class="card"><h3>Built for hostile input</h3>
+    <p>Fuzzed per format. Bounded allocations, zip-bomb caps, no network at convert time.</p></div>
+  <div class="card"><h3>Honest failures</h3>
+    <p>A scanned PDF returns <code>ErrNoTextLayer</code>, never a silent empty string.</p></div>
+</div>
+
+<h2>Formats</h2>
+<div class="tw">
+<table>
+<thead><tr><th>Format</th><th>Extracted</th></tr></thead>
+<tbody>
+<tr><td>Word</td><td>headings, lists, tables, links, image alt text, title</td></tr>
+<tr><td>PowerPoint</td><td>slide text, tables, charts, image alt text, speaker notes</td></tr>
+<tr><td>Excel</td><td>every sheet as a heading + table — <code>.xlsx</code> and legacy <code>.xls</code></td></tr>
+<tr><td>PDF</td><td>text layer, page by page</td></tr>
+<tr><td>HTML</td><td>headings, lists, tables, links, with charset detection</td></tr>
+<tr><td>EPUB</td><td>spine order, chapter by chapter, metadata</td></tr>
+<tr><td>Outlook <code>.msg</code></td><td>subject, From/To/Cc/Date, HTML or plain body</td></tr>
+<tr><td>ZIP</td><td>recursive conversion of every member, depth-bounded</td></tr>
+<tr><td>Feeds</td><td>RSS and Atom, per-entry</td></tr>
+<tr><td>Notebooks</td><td>markdown + code cells, text outputs</td></tr>
+<tr><td>Data</td><td>CSV, TSV, JSON, plain text</td></tr>
+<tr><td>Images</td><td>dimensions and EXIF (camera, exposure, GPS)</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>What it deliberately does not do</h2>
+<p class="note">No OCR. No audio transcription. No LLM captioning. No network access during
+conversion. Each needs a model or a fetch, and shipping either would cost the single-binary
+promise that is the reason to choose this library. A scanned PDF returns a named error so
+you can route it to an OCR service yourself.</p>
+
+<h2>Verified against markitdown's own corpus</h2>
+<p>Checked against the 31 test files in Microsoft markitdown's test suite, not only
+fixtures we wrote ourselves. <strong>26 of 31 convert.</strong> The other five are the
+scope decisions above — one scanned PDF, three audio files, one random binary that is
+correctly refused rather than emitted as garbage.</p>
+
+<footer>
+  MIT licensed · <a href="https://github.com/muthuishere/anymd">Source on GitHub</a> ·
+  <a href="https://pkg.go.dev/github.com/muthuishere/anymd">API docs</a><br>
+  Not affiliated with Microsoft or the markitdown project.
+</footer>
+
+</div>
+</body>
+</html>
