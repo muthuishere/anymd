@@ -131,7 +131,8 @@ and exists for self-signed internal hosts; do not point it at the public interne
 | Plain text / Markdown | `.txt` `.text` `.md` `.markdown` `.log` | verbatim passthrough (last-resort fallback) | — |
 | CSV / TSV | `.csv` `.tsv` `.tab` | delimiter sniffing → GFM pipe table | formulas (there are none), cell types |
 | Excel | `.xlsx` `.xlsm` `.xltx` `.xltm` | every sheet as a heading + table, computed cell values | charts, images, macros, pivot tables |
-| Word | `.docx` | headings, paragraphs, lists, tables, links, core-properties title | embedded images (dropped unless `--keep-data-uris`), comments, tracked changes |
+| Excel (legacy) | `.xls` `.xlt` `.xlm` `.xlw` | same output as `.xlsx`, byte-identical on the same workbook | formula results (the BIFF reader returns a placeholder), Excel's own date formats |
+| Word | `.docx` | headings, paragraphs, lists, tables, links, image alt text, core-properties title | image pixels, comments, tracked changes |
 | PDF | `.pdf` | text layer, page by page | **no OCR** — a scanned page yields nothing; layout columns, figures, forms |
 | HTML | `.html` `.htm` `.xhtml` | headings, lists, tables, links, code, `<title>` | scripts, styles, anything requiring JS execution, remote assets |
 | Feeds | `.rss` `.atom` `.xml` `.rdf` | channel/feed title, per-entry title, date, link, summary | full-article fetch (that would be a network call) |
@@ -139,14 +140,31 @@ and exists for self-signed internal hosts; do not point it at the public interne
 | Notebooks | `.ipynb` | markdown cells, code cells as fenced blocks, text outputs | rendered plots and images, widget state |
 | EPUB | `.epub` | spine order, per-chapter HTML → Markdown, metadata title | cover art, footnote back-links, DRM'd books |
 | ZIP | `.zip` | recursive conversion of each member, bounded by `--max-depth` | encrypted archives |
-| PowerPoint | `.pptx` | slide-by-slide shape text, tables, speaker notes | slide images, animations, themes, layout geometry |
+| PowerPoint | `.pptx` | slide-by-slide shape text, tables, charts, image alt text, speaker notes | image pixels, animations, themes, layout geometry |
 | Images | `.jpg` `.jpeg` `.png` `.gif` `.webp` `.tiff` `.bmp` | pixel dimensions and EXIF metadata (capture time, camera, lens, exposure, GPS, description, rights) | **no OCR, no captioning** — the pixels are never described |
-| Outlook mail | `.msg` | *planned* — not in this tree yet | |
+| Outlook mail | `.msg` | subject, From/To/Cc/Date table, HTML or plain body | attachments, RTF-compressed bodies, recipient storages |
 
 Anything with no matching converter that still decodes as UTF-8 text falls through
 to the plaintext converter; genuinely binary input with no converter is an error
 (exit 1), never silent garbage. `anymd --list` prints the live registry in dispatch
 order, which is always the authoritative answer for the build you have.
+
+### Verified against markitdown's own corpus
+
+`anymd` is checked against the 31 test files in Microsoft markitdown's own test
+suite, not only against fixtures we wrote ourselves — fixtures only ever assert
+what we already thought to build. **26 of 31 convert.** The five that do not are
+each a deliberate scope decision, not a bug:
+
+| file | outcome |
+|---|---|
+| `MEDRPT-…_medical_report_scan.pdf` | `ErrNoTextLayer` — a scan with no text layer. We return a named error instead of empty output, so a caller can tell "nothing to extract" from "extraction failed". |
+| `test.m4a` `test.mp3` `test.wav` | audio: transcription needs a model, which this project does not ship |
+| `random.bin` | correctly refused rather than emitted as garbage |
+
+Output is also checked against markitdown's own canary assertions
+(`PPTX_TEST_STRINGS`): all present, including the image alt text and the chart
+content that live outside the slide XML.
 
 ### Deliberate omissions
 
