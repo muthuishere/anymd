@@ -365,8 +365,13 @@ func TestRegistryDigestDistinguishesEngines(t *testing.T) {
 	if a.registryDigest() == b.registryDigest() {
 		t.Fatal("engines with different registries produced the same digest")
 	}
-	if New().registryDigest() != New().registryDigest() {
-		t.Fatal("the same registry produced two digests")
+	// Two independently constructed engines must agree, or the cache key is
+	// unstable across processes. Bound to variables because staticcheck cannot
+	// see that New() is called twice and flags the inline form as comparing an
+	// expression with itself.
+	first, second := New().registryDigest(), New().registryDigest()
+	if first != second {
+		t.Fatalf("the same registry produced two digests: %q vs %q", first, second)
 	}
 }
 
