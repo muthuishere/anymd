@@ -15,6 +15,7 @@ the new reasoning is.
 |---|---|---|
 | [0001](0001-pure-go-no-cgo-no-network.md) | Pure Go, and no network the caller did not ask for | Accepted (recorded retrospectively) |
 | [0002](0002-vendor-the-pdf-parser.md) | Vendor the PDF parser as `internal/pdf` and cache resolved objects | Accepted |
+| [0003](0003-quality-benchmark-against-docling.md) | Measure output quality against docling's ground truth | Accepted |
 
 ## Format
 

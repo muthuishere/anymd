@@ -134,10 +134,118 @@ Two things worth being precise about:
    indexing nothing is indistinguishable from a document that genuinely had no
    text. anymd returns `ErrNoTextLayer` so a caller can route the file to OCR.
 
-## What this does not measure
+## Quality — fidelity, not byte counts
 
-Output *quality* is not benchmarked here — byte counts are not fidelity. The
-two tools produce different markdown for the same input (see the corpus check
-in the README). Where output size differs sharply, such as RSS feeds, it is
-because the tools make different choices about how much of an entry's HTML body
-to keep, not because one is failing.
+Run it yourself: `./bench/run-quality.sh <path-to-a-docling-checkout>`.
+
+Every number above is a speed number, and speed is the easy one to win. This is
+the number that decides whether the output is worth having, and anymd currently
+**loses it**. The decision to measure it this way is
+[ADR 0003](../docs/adr/0003-quality-benchmark-against-docling.md).
+
+### The corpus and the target
+
+The corpus is [docling](https://github.com/docling-project/docling)'s test
+suite — 130 in-scope documents shipped as (source, expected markdown) pairs
+under `tests/data/<format>/{sources,groundtruth}`. Two things make it worth
+borrowing: the pairs are machine-matchable, and the files are named for the
+feature they exercise (`docx_lists.docx`, `xlsx_07_gap_tolerance_.xlsx`), so a
+low score names the broken feature instead of merely asserting one exists.
+
+**docling is the target, not a contestant.** Its ground truth is its own frozen
+output, so it would score 1.00 by construction and reporting that would be
+meaningless. It is not run. The head-to-head is anymd vs markitdown, both of
+which are third parties to that ground truth.
+
+Scoring is style-insensitive on purpose. `| --- |` against `| - |`, `#` against
+`##`, `<!-- image -->` against nothing — those are conventions, not defects, and
+are normalized away before anything is compared.
+
+### The metrics
+
+| | what it catches |
+|---|---|
+| **content** | token F1, order-insensitive — dropped and invented content |
+| **order** | token F1, order-**sensitive** — scrambled reading order |
+| **tables** | each ground-truth table matched to its best candidate, scored on cell content |
+| **headings** / **lists** | fraction of ground-truth items that survive |
+
+**content and order are a pair, and the gap between them is the point.** A
+two-column PDF read straight down the page keeps every token, so content stays
+high while order collapses. That gap separates a reading-order defect from a
+content-loss defect, which no single similarity score can do.
+
+`declined` counts explicit refusals (nonzero exit), which are withheld from the
+averages. A tool that fails loudly hands the caller something actionable, and
+scoring that 0.00 would punish the exact behaviour the coverage section above
+argues for. Exit-0-with-empty-output is *not* withheld — that is the silent
+failure, and it scores 0 like any other miss.
+
+### Results
+
+130 documents, anymd v0.1.0 against markitdown 0.1.5. Bold marks the winner
+where the gap is more than a rounding difference.
+
+| format | n | content | order | tables | headings | lists |
+|---|---:|---:|---:|---:|---:|---:|
+| csv | 9 | **1.00** / 0.98 | **1.00** / 0.98 | **1.00** / 0.98 | 1.00 / 1.00 | 1.00 / 1.00 |
+| docx | 33 | 0.84 / **0.94** | 0.84 / **0.94** | 0.89 / **0.96** | **0.95** / 0.88 | 0.85 / 0.87 |
+| epub | 1 | 1.00 / 0.99 | 1.00 / 0.99 | 1.00 / 1.00 | 1.00 / 1.00 | 1.00 / 1.00 |
+| html | 32 | 0.95 / 0.96 | 0.95 / 0.96 | 0.69 / **0.98** | 1.00 / 1.00 | 0.94 / 0.94 |
+| md | 10 | 0.97 / 0.97 | 0.97 / 0.97 | 0.87 / 0.87 | 0.92 / 0.92 | 0.78 / 0.78 |
+| odf (as pdf) | 6 | 0.64 / **0.94** | 0.60 / **0.82** | 0.17 / **0.38** | 0.17 / 0.17 | 0.56 / 0.56 |
+| pdf | 15 | 0.87 / 0.90 | 0.70 / 0.74 | 0.43 / **0.56** | 0.14 / 0.20 | 0.44 / 0.42 |
+| pptx | 8 | 0.80 / 0.82 | 0.77 / 0.82 | 0.98 / 0.95 | **1.00** / 0.86 | 0.56 / 0.57 |
+| xls | 1 | **0.95** / 0.68 | **0.95** / 0.68 | **0.64** / 0.41 | 1.00 / 1.00 | 1.00 / 1.00 |
+| xlsx | 11 | **0.87** / 0.68 | **0.83** / 0.65 | **0.74** / 0.60 | 0.95 / 1.00 | 1.00 / 1.00 |
+| **all** | **130** | 0.88 / **0.91** | 0.86 / **0.88** | 0.75 / **0.85** | **0.84** / 0.82 | 0.82 / 0.82 |
+
+anymd wins the spreadsheet formats decisively — xlsx content **0.87 against
+0.68** — and csv outright. It loses docx, html tables, pdf, and the aggregate.
+
+These numbers are unchanged by the vendored PDF parser of
+[ADR 0002](../docs/adr/0002-vendor-the-pdf-parser.md), which is the point: that
+change bought 16.8× and was asserted to leave output byte-identical. Running
+this benchmark either side of it is the first independent check of that claim.
+
+### What the low scores actually are
+
+A quality benchmark earns its keep by naming bugs, not by producing a number.
+These are the ones it found on its first run:
+
+| file | score | defect |
+|---|---|---|
+| `drawingml.docx` | content **0.08** | 13 bytes emitted — DrawingML canvas text and embedded chart data dropped entirely |
+| `textbox.docx` | content **0.13** | Word text boxes (`w:txbxContent`) not extracted |
+| `docx_rich_tables_01.docx` | tables **0.00** | rich table cells lost |
+| `2203.01017v2.pdf` | content 0.82, order **0.50** | two-column arXiv paper: nearly all the text, half the order |
+| `2206.01062.pdf` | content 0.71, order **0.47** | same defect |
+| `table_mislabeled_as_picture.pdf` | content 0.97, order **0.49** | the textbook case — the content is *there*, the sequence is wrong |
+| `xlsx_07_gap_tolerance_.xlsx` | tables **0.11** | one table dumped per sheet; separate logical tables not split on blank-row gaps |
+| `hyperlink_02.html` | content 0.40 | link handling |
+
+The three PDF rows are one bug, not three. `pdfPageText` in `conv_pdf.go` orders
+glyphs by `Y` descending then `X` ascending, which on a two-column page
+interleaves the columns line by line. docling solves this without a model:
+`ReadingOrderPredictor` in `docling/models/postprocessing/reading_order_rb.py`
+builds bounding-box adjacency between blocks, dilates horizontally to merge
+column fragments, and walks the resulting graph depth-first. That is geometry
+and a graph traversal, both portable to Go.
+
+The two `docx` rows are the more serious pair. A scrambled PDF is visibly
+degraded; a dropped text box is a document that silently converts to almost
+nothing at exit 0, which is the failure mode this project criticises markitdown
+for elsewhere in this file.
+
+`table_misidentified_as_form.pdf` is the single declined file — a scanned PDF
+with no text layer, refused with `ErrNoTextLayer`. The vision-model path added
+in `cca96b3` handles it, but is opt-in and unconfigured here, which is why the
+refusal still stands.
+
+## What this still does not measure
+
+The ground truth is docling's output, so "quality" here means agreement with
+docling. Where docling is itself wrong, matching it scores well — two of the
+corpus filenames (`table_misidentified_as_form`, `table_mislabeled_as_picture`)
+are docling's own record of getting a page wrong. It also says nothing about
+formats docling ships no pairs for: rss, msg, zip, ipynb, and images.
