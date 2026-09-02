@@ -69,6 +69,7 @@ func main() {
 // config is the parsed command line.
 type config struct {
 	cache     cacheOptions
+	crawl     crawlOptions
 	out       string
 	outdir    string
 	ext       string
@@ -108,6 +109,7 @@ func newFlagSet(cfg *config, stderr io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet("anymd", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	registerCacheFlags(fs, &cfg.cache)
+	registerCrawlFlags(fs, &cfg.crawl)
 
 	strVar := func(p *string, def string, names ...string) {
 		for _, n := range names {
@@ -152,6 +154,7 @@ const usage = `anymd — convert any document to Markdown (pure Go, no cgo)
 usage: anymd [flags] [file|url ...]
        anymd config <path|show|init> [--llm-config FILE]
        anymd cache  <path|stats|clean> [--cache-dir DIR]
+       anymd --crawl --depth 2 -d out/ https://example.dev/
 
   With no arguments (or "-") anymd reads stdin and writes Markdown to stdout.
   With a single input and no -o/-d it writes to stdout. Progress, warnings and
@@ -190,7 +193,7 @@ during conversion at all, which is what makes it safe on untrusted input):
   or ANTHROPIC_API_KEY), or from the config file via ${VAR} interpolation.
   anymd never prints a key, not even masked.
 
-` + "\n" + cacheFlagUsage + `
+` + "\n" + cacheFlagUsage + "\n" + crawlFlagUsage + `
 config subcommand:
   anymd config path   print the config file path
   anymd config show   print the resolved config with every secret redacted
@@ -262,6 +265,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var code int
 	if opts.Cache, code = resolveCache(&cfg.cache, cfg.setFlags, stderr); code != exitOK {
 		return code
+	}
+
+	// Crawling is checked before anything is read: it changes what the
+	// arguments MEAN (seeds, not files), and a crawl flag without --crawl is a
+	// usage error rather than a silently ignored argument — the same rule the
+	// LLM and cache flags follow, for the same reason.
+	if code := applyCrawl(cfg, stderr); code != exitOK {
+		return code
+	}
+	if cfg.crawl.enable {
+		return runCrawl(engine, cfg, opts, stderr)
 	}
 
 	// stdin mode: no inputs at all, or the single conventional "-".
