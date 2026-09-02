@@ -10,18 +10,24 @@
 //
 // # Scope, stated honestly
 //
-// anymd extracts what is already text in the document. It does not invent text
-// that is not there:
+// By default anymd extracts what is already text in the document and invents
+// nothing:
 //
-//	no OCR              — a scanned PDF or a photo of a page yields no prose
-//	no transcription    — audio and video are not supported at all
+//	no OCR              — a scanned PDF yields ErrNoTextLayer, not empty output
+//	no transcription    — an audio file is declined, not silently emptied
 //	no LLM captioning   — an image's pixels are never described
 //	no network          — a converter never fetches a remote asset or link
 //
-// Each of those would require a model, a service, an API key, or a native
-// dependency, and would break the one property this library sells. If you want
-// them, wrap anymd in your own pipeline, where you control the cost and the
-// data boundary.
+// Every one of those is a DEFAULT, not a limit. Supply an Options.Describer or
+// Options.Transcriber and anymd will read scanned pages, caption images, and
+// transcribe audio; see the llm subpackage for an implementation. Nothing here
+// is a native dependency — the pure-Go, no-cgo property is an invariant and is
+// unaffected either way.
+//
+// The distinction matters: the objection was never that a model is wrong, it
+// was that a model must not be a surprise. With no Describer and no
+// Transcriber, conversion makes no network call of any kind, which is what
+// makes anymd safe to point at untrusted documents.
 //
 // # The pure-Go promise
 //
@@ -158,7 +164,7 @@
 //	Excel                  .xlsx .xlsm .xltx .xltm         one heading + table per sheet
 //	Excel (legacy BIFF)    .xls .xlt .xlm .xlw             same output as .xlsx
 //	Word                   .docx                           headings, lists, tables, links, title
-//	PDF                    .pdf                            text layer, page by page (no OCR)
+//	PDF                    .pdf                            text layer, column-aware order (scans need a Describer)
 //	HTML                   .html .htm .xhtml               headings, lists, tables, links, code
 //	Feeds                  .rss .atom .xml .rdf            feed and entry titles, dates, summaries
 //	JSON                   .json                           pretty-printed, fenced

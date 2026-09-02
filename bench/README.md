@@ -216,7 +216,9 @@ this benchmark either side of it is the first independent check of that claim.
 ### What the low scores actually are
 
 A quality benchmark earns its keep by naming bugs, not by producing a number.
-These are the ones it found on its first run:
+These are the ones it found on its first run. **All of them have since been
+fixed** — the table is kept because it is the evidence that the benchmark
+works, and the scores above are what the fixes produced:
 
 | file | score | defect |
 |---|---|---|
@@ -229,9 +231,11 @@ These are the ones it found on its first run:
 | `xlsx_07_gap_tolerance_.xlsx` | tables **0.11** | one table dumped per sheet; separate logical tables not split on blank-row gaps |
 | `hyperlink_02.html` | content 0.40 | link handling |
 
-The three PDF rows are one bug, not three. `pdfPageText` in `conv_pdf.go` orders
-glyphs by `Y` descending then `X` ascending, which on a two-column page
-interleaves the columns line by line. docling solves this without a model:
+The three PDF rows were one bug, not three. `pdfPageText` in `conv_pdf.go`
+ordered glyphs by `Y` descending then `X` ascending, which on a two-column page
+interleaved the columns line by line. **Fixed** — a recursive XY-cut took PDF
+order 0.70 to 0.77, past markitdown's 0.74, with content unchanged on all 15
+files. docling solves this without a model:
 `ReadingOrderPredictor` in `docling/models/postprocessing/reading_order_rb.py`
 builds bounding-box adjacency between blocks, dilates horizontally to merge
 column fragments, and walks the resulting graph depth-first. That is geometry

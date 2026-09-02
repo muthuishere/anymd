@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Benchmarks — anymd</title>
+<meta name="description" content="Measured speed and output quality of anymd against markitdown 0.1.5: in-process and CLI timings, memory, install footprint, and a 130-document quality benchmark scored against docling's ground truth.">
+<link rel="stylesheet" href="./assets/style.css">
+</head>
+<body>
+
+<nav class="site"><div class="wrap">
+  <a class="brand" href="./">anymd</a>
+  <a href="./cli.html">CLI</a>
+  <a href="./library.html">Library</a>
+  <a href="./formats.html">Formats</a>
+  <a href="./llm.html">LLM</a>
+  <a href="./cache.html">Cache</a>
+  <a href="./benchmarks.html" aria-current="page">Benchmarks</a>
+  <a href="https://pkg.go.dev/github.com/muthuishere/anymd">API&nbsp;↗</a>
+  <a href="https://github.com/muthuishere/anymd">GitHub&nbsp;↗</a>
+</div></nav>
+
+<div class="wrap">
+
+<header class="page">
+  <h1>Benchmarks</h1>
+  <p class="lede">Speed and quality, both measured, against Microsoft's markitdown — the Python tool anymd is an alternative to. Where markitdown wins, this page says so.</p>
+</header>
+
+<p>Speed is the easy number to win, and on its own it proves nothing: a converter that emits garbage quickly is worthless. So there are two halves here. The first is timing. The second is a 130-document fidelity benchmark scored against docling's ground truth, which is the number that decides whether the output is worth having.</p>
+
+<p>Reproduce both:</p>
+
+<pre><code>./bench/run.sh                            # speed, memory, coverage (needs uv, hyperfine, Go)
+./bench/run-quality.sh &lt;docling-checkout&gt;  # quality</code></pre>
+
+<h2 id="environment">Environment</h2>
+
+<div class="tw"><table>
+<tbody>
+<tr><th>Machine</th><td>Apple M5 Pro (darwin/arm64), macOS 25.4</td></tr>
+<tr><th>anymd</th><td>v0.1.0, Go 1.26</td></tr>
+<tr><th>markitdown</th><td>0.1.5, Python 3.12.13, <code>markitdown[all]</code> (pdfminer.six 20260107)</td></tr>
+<tr><th>Corpus</th><td>the 31 files in markitdown's own test suite</td></tr>
+</tbody>
+</table></div>
+
+<h2 id="speed">Speed — in process</h2>
+
+<p>Mean of 10 runs after a warm-up. This excludes interpreter startup, so it is the honest number for a long-running service.</p>
+
+<div class="tw"><table>
+<thead><tr><th>file</th><th>anymd</th><th>markitdown</th><th>speedup</th></tr></thead>
+<tbody>
+<tr><td>test.epub</td><td>0.10 ms</td><td>3.10 ms</td><td><strong>31×</strong></td></tr>
+<tr><td>test.docx</td><td>0.59 ms</td><td>17.86 ms</td><td><strong>30×</strong></td></tr>
+<tr><td>test.xlsx</td><td>0.64 ms</td><td>7.35 ms</td><td><strong>11×</strong></td></tr>
+<tr><td>test.pptx</td><td>0.91 ms</td><td>8.52 ms</td><td><strong>9.4×</strong></td></tr>
+<tr><td>test.pdf</td><td>3.44 ms</td><td>74.47 ms</td><td><strong>22×</strong></td></tr>
+<tr><td>test_wikipedia.html (385K)</td><td>11.55 ms</td><td>104.15 ms</td><td><strong>9.0×</strong></td></tr>
+</tbody>
+</table></div>
+
+<h3>PDF used to be the exception</h3>
+
+<p>An earlier revision of the benchmark reported PDF at 45.69 ms — a 1.7× win — and explained it away as "both tools are dominated by the PDF parser itself". That explanation was wrong twice over, and it is worth writing down, because it is the shape of mistake a benchmark exists to catch.</p>
+
+<p>It named the wrong engine (anymd has never used pdfium; it parses with <code>ledongthuc/pdf</code>, a fork of Russ Cox's <code>rsc.io/pdf</code>, now vendored as <code>internal/pdf</code>), and it treated the cost as inherent when it was self-inflicted. That library ships with no cache for resolved indirect objects — its own doc comment says a value cache "would probably help significantly" — while <code>Page.Content()</code> asks for a glyph's width once per glyph, and each of those asks re-reads and re-lexes the font's <code>/Widths</code> array from the file bytes. Laying out a page was O(glyphs × len(Widths)) trips through the lexer: for a 93 KB document, 1,565,898 allocations and 75 MB.</p>
+
+<p>Adding the cache is about ten lines and leaves output byte-identical on all seven corpus PDFs. Same harness, before and after:</p>
+
+<div class="tw"><table>
+<thead><tr><th>file</th><th>before</th><th>after</th><th></th></tr></thead>
+<tbody>
+<tr><td>test.pdf</td><td>43.77 ms</td><td>2.60 ms</td><td><strong>16.8×</strong></td></tr>
+<tr><td>REPAIR-2022-INV-001_multipage.pdf</td><td>13.34 ms</td><td>1.34 ms</td><td><strong>10.0×</strong></td></tr>
+<tr><td>RECEIPT-2024-TXN-98765_retail_purchase.pdf</td><td>0.90 ms</td><td>0.51 ms</td><td>1.8×</td></tr>
+<tr><td>movie-theater-booking-2024.pdf</td><td>0.50 ms</td><td>0.46 ms</td><td>—</td></tr>
+<tr><td>SPARSE-2024-INV-1234_borderless_table.pdf</td><td>0.48 ms</td><td>0.44 ms</td><td>—</td></tr>
+<tr><td>masterformat_partial_numbering.pdf</td><td>0.12 ms</td><td>0.11 ms</td><td>—</td></tr>
+</tbody>
+</table></div>
+
+<p>The win tracks embedded fonts, not page count: documents with subset fonts and large <code>/Widths</code> arrays were paying the quadratic, and documents drawing text in a base-14 font never were. <code>BenchmarkConvertPdf</code> fell from 42.6 ms / 1,565,898 allocs / 75 MB to 2.59 ms / 16,605 allocs / 2.2 MB. The decision and its trade-offs are in <a href="https://github.com/muthuishere/anymd/blob/main/docs/adr/0002-vendor-the-pdf-parser.md">ADR 0002</a>.</p>
+
+<h2 id="cli">Speed — CLI end to end</h2>
+
+<p>markitdown pays <strong>309 ms</strong> of Python import and init on <em>every</em> invocation. That cost is real for scripts and shell pipelines, and irrelevant to a long-running service — which is why both tables are here.</p>
+
+<div class="tw"><table>
+<thead><tr><th>file</th><th>anymd</th><th>markitdown</th><th>speedup</th></tr></thead>
+<tbody>
+<tr><td>test.docx</td><td>6.7 ms</td><td>375.7 ms</td><td><strong>56×</strong></td></tr>
+<tr><td>test.xlsx</td><td>7.0 ms</td><td>377.0 ms</td><td><strong>54×</strong></td></tr>
+<tr><td>test.pdf</td><td>9.4 ms</td><td>431.1 ms</td><td><strong>46×</strong></td></tr>
+<tr><td>test_wikipedia.html</td><td>19.3 ms</td><td>473.6 ms</td><td><strong>25×</strong></td></tr>
+</tbody>
+</table></div>
+
+<p>At this end of the scale anymd is close to the floor: about 6 ms of it is process start and exit, which is why the four numbers cluster and why small PDFs show no CLI speedup at all even where the library got 10× faster.</p>
+
+<h2 id="memory">Memory and footprint</h2>
+
+<div class="tw"><table>
+<thead><tr><th></th><th>anymd</th><th>markitdown</th></tr></thead>
+<tbody>
+<tr><td>Peak RSS (test_wikipedia.html)</td><td><strong>27 MB</strong></td><td>160 MB</td></tr>
+<tr><td>Install footprint</td><td><strong>17 MB</strong> (one binary)</td><td>318 MB (venv + deps)</td></tr>
+</tbody>
+</table></div>
+
+<h2 id="coverage">Coverage — the number that is easy to report dishonestly</h2>
+
+<p>A naive count says markitdown converts 30/31 files and anymd 26/31. That comparison is wrong, because exit code 0 is not the same as output.</p>
+
+<p>Counting files that produce <strong>substantive output</strong> (more than 200 bytes):</p>
+
+<div class="tw"><table>
+<thead><tr><th></th><th>anymd</th><th>markitdown</th></tr></thead>
+<tbody>
+<tr><td>substantive conversions</td><td><strong>19/31</strong></td><td><strong>19/31</strong></td></tr>
+</tbody>
+</table></div>
+
+<p>Dead even. The five files anymd refuses break down as:</p>
+
+<div class="tw"><table>
+<thead><tr><th>file</th><th>anymd</th><th>markitdown</th></tr></thead>
+<tbody>
+<tr><td>scanned medical PDF</td><td><code>ErrNoTextLayer</code> (exit 1)</td><td><strong>0 bytes, exit 0</strong></td></tr>
+<tr><td>test.jpg, test_llm.jpg</td><td>131 / 60 bytes of EXIF</td><td><strong>0 bytes, exit 0</strong></td></tr>
+<tr><td>test.mp3 / .m4a / .wav</td><td>error (exit 1)</td><td>29-byte transcript</td></tr>
+<tr><td>random.bin</td><td>error</td><td>error</td></tr>
+</tbody>
+</table></div>
+
+<p>Two things worth being precise about.</p>
+
+<p><strong>markitdown genuinely transcribes audio.</strong> That is a real capability, and it does it by sending the audio to a remote speech service — exactly the kind of convert-time network call anymd does not make by default. anymd closes that gap only when you supply a <a href="./llm.html">Transcriber</a>. Different trade-off, not a defect on either side.</p>
+
+<p><strong>On the scanned PDF and both images, markitdown returns an empty string and exit 0.</strong> For an ingestion pipeline that is the worst outcome: silently indexing nothing is indistinguishable from a document that genuinely had no text. anymd returns <a href="./library.html#errors"><code>ErrNoTextLayer</code></a> so a caller can route the file to OCR — or to a vision model.</p>
+
+<h2 id="quality">Quality — fidelity, not byte counts</h2>
+
+<p>anymd lost this benchmark when it was first written. The defects it named were then fixed, and anymd now leads every aggregate metric. The decision to measure it this way is <a href="https://github.com/muthuishere/anymd/blob/main/docs/adr/0003-quality-benchmark-against-docling.md">ADR 0003</a>.</p>
+
+<h3>The corpus and the target</h3>
+
+<p>The corpus is <a href="https://github.com/docling-project/docling">docling</a>'s test suite — 130 in-scope documents shipped as (source, expected markdown) pairs under <code>tests/data/&lt;format&gt;/{sources,groundtruth}</code>. Two things make it worth borrowing: the pairs are machine-matchable, and the files are named for the feature they exercise (<code>docx_lists.docx</code>, <code>xlsx_07_gap_tolerance_.xlsx</code>), so a low score names the broken feature instead of merely asserting one exists.</p>
+
+<p class="note"><strong>docling is the target, not a contestant.</strong> Its ground truth is its own frozen output, so it would score 1.00 by construction and reporting that would be meaningless. It is not run. The head-to-head is anymd against markitdown, both of which are third parties to that ground truth.</p>
+
+<p>Scoring is style-insensitive on purpose. <code>| --- |</code> against <code>| - |</code>, <code>#</code> against <code>##</code>, <code>&lt;!-- image --&gt;</code> against nothing — those are conventions, not defects, and are normalized away before anything is compared.</p>
+
+<h3>The metrics</h3>
+
+<div class="tw"><table>
+<thead><tr><th>metric</th><th>what it catches</th></tr></thead>
+<tbody>
+<tr><td><strong>content</strong></td><td>token F1, order-insensitive — dropped and invented content</td></tr>
+<tr><td><strong>order</strong></td><td>token F1, order-<em>sensitive</em> — scrambled reading order</td></tr>
+<tr><td><strong>tables</strong></td><td>each ground-truth table matched to its best candidate, scored on cell content</td></tr>
+<tr><td><strong>headings</strong> / <strong>lists</strong></td><td>fraction of ground-truth items that survive</td></tr>
+</tbody>
+</table></div>
+
+<p><strong>content and order are a pair, and the gap between them is the diagnosis.</strong> A two-column PDF read straight down the page keeps every token, so content stays high while order collapses. That gap separates a reading-order defect from a content-loss defect, which no single similarity score can do. Look for it in the <code>pdf</code> row below, and in the per-file table further down where <code>table_mislabeled_as_picture.pdf</code> scores content 0.97 and order 0.49.</p>
+
+<p><code>declined</code> counts explicit refusals (nonzero exit), which are withheld from the averages. A tool that fails loudly hands the caller something actionable, and scoring that 0.00 would punish the exact behaviour the coverage section argues for. Exit-0-with-empty-output is <em>not</em> withheld — that is the silent failure, and it scores 0 like any other miss.</p>
+
+<h3>Results</h3>
+
+<p>130 documents, anymd v0.1.0 against markitdown 0.1.5. Each cell reads <strong>anymd / markitdown</strong>. Bold marks the winner where the gap is more than a rounding difference.</p>
+
+<div class="tw"><table>
+<thead><tr><th>format</th><th>n</th><th>content</th><th>order</th><th>tables</th><th>headings</th><th>lists</th></tr></thead>
+<tbody>
+<tr><td>csv</td><td>9</td><td><strong>1.00</strong> / 0.98</td><td><strong>1.00</strong> / 0.98</td><td><strong>1.00</strong> / 0.98</td><td>1.00 / 1.00</td><td>1.00 / 1.00</td></tr>
+<tr><td>docx</td><td>33</td><td>0.94 / 0.94</td><td>0.94 / 0.94</td><td><strong>0.98</strong> / 0.96</td><td><strong>0.95</strong> / 0.88</td><td><strong>0.91</strong> / 0.87</td></tr>
+<tr><td>epub</td><td>1</td><td>1.00 / 0.99</td><td>1.00 / 0.99</td><td>1.00 / 1.00</td><td>1.00 / 1.00</td><td>1.00 / 1.00</td></tr>
+<tr><td>html</td><td>32</td><td><strong>0.97</strong> / 0.96</td><td><strong>0.97</strong> / 0.96</td><td><strong>0.99</strong> / 0.98</td><td>1.00 / 1.00</td><td>0.94 / 0.94</td></tr>
+<tr><td>md</td><td>10</td><td>0.97 / 0.97</td><td>0.97 / 0.97</td><td>0.87 / 0.87</td><td>0.92 / 0.92</td><td>0.78 / 0.78</td></tr>
+<tr><td>odf (as pdf)</td><td>6</td><td>0.64 / <strong>0.94</strong></td><td>0.60 / <strong>0.82</strong></td><td>0.17 / <strong>0.38</strong></td><td>0.17 / 0.17</td><td>0.56 / 0.56</td></tr>
+<tr><td>pdf</td><td>15</td><td>0.87 / 0.90</td><td><strong>0.77</strong> / 0.74</td><td>0.43 / <strong>0.56</strong></td><td>0.14 / 0.20</td><td>0.44 / 0.42</td></tr>
+<tr><td>pptx</td><td>8</td><td>0.80 / 0.82</td><td>0.77 / 0.82</td><td><strong>0.98</strong> / 0.95</td><td><strong>1.00</strong> / 0.86</td><td>0.56 / 0.57</td></tr>
+<tr><td>xls</td><td>1</td><td><strong>0.95</strong> / 0.68</td><td><strong>0.95</strong> / 0.68</td><td><strong>1.00</strong> / 0.41</td><td>1.00 / 1.00</td><td>1.00 / 1.00</td></tr>
+<tr><td>xlsx</td><td>11</td><td><strong>0.98</strong> / 0.68</td><td><strong>0.98</strong> / 0.65</td><td><strong>0.99</strong> / 0.60</td><td>1.00 / 1.00</td><td>1.00 / 1.00</td></tr>
+<tr><td><strong>all</strong></td><td><strong>130</strong></td><td><strong>0.92</strong> / 0.91</td><td><strong>0.91</strong> / 0.88</td><td><strong>0.87</strong> / 0.85</td><td><strong>0.84</strong> / 0.82</td><td><strong>0.83</strong> / 0.82</td></tr>
+</tbody>
+</table></div>
+
+<p>anymd leads every aggregate metric. The spreadsheet lead is the decisive one: xlsx content <strong>0.98 against 0.68</strong>, tables <strong>0.99 against 0.60</strong>.</p>
+
+<h3 id="losses">Where anymd still loses</h3>
+
+<p class="warn">Three places, stated plainly.</p>
+
+<ul>
+<li><strong><code>odf</code></strong>, which routes through the PDF converter rather than having a converter of its own: content 0.64 against markitdown's 0.94, order 0.60 against 0.82, tables 0.17 against 0.38.</li>
+<li><strong>PDF content</strong>: 0.87 against 0.90.</li>
+<li><strong>PDF tables and headings</strong>, where anymd emits almost none. <code>out_tables: 0</code> on every PDF is a <em>missing feature</em>, not a tuning problem, and it is the largest remaining gap on this benchmark.</li>
+</ul>
+
+<p>The quality numbers are unchanged by the vendored PDF parser of <a href="https://github.com/muthuishere/anymd/blob/main/docs/adr/0002-vendor-the-pdf-parser.md">ADR 0002</a>, which is the point: that change bought 16.8× and was asserted to leave output byte-identical. Running this benchmark either side of it is the first independent check of that claim.</p>
+
+<h3 id="defects">What the low scores actually were</h3>
+
+<p>A quality benchmark earns its keep by naming bugs, not by producing a number. These are the ones it found on its first run — before the fixes that produced the table above:</p>
+
+<div class="tw"><table>
+<thead><tr><th>file</th><th>score</th><th>defect</th></tr></thead>
+<tbody>
+<tr><td><code>drawingml.docx</code></td><td>content <strong>0.08</strong></td><td>13 bytes emitted — DrawingML canvas text and embedded chart data dropped entirely</td></tr>
+<tr><td><code>textbox.docx</code></td><td>content <strong>0.13</strong></td><td>Word text boxes (<code>w:txbxContent</code>) not extracted</td></tr>
+<tr><td><code>docx_rich_tables_01.docx</code></td><td>tables <strong>0.00</strong></td><td>rich table cells lost</td></tr>
+<tr><td><code>2203.01017v2.pdf</code></td><td>content 0.82, order <strong>0.50</strong></td><td>two-column arXiv paper: nearly all the text, half the order</td></tr>
+<tr><td><code>2206.01062.pdf</code></td><td>content 0.71, order <strong>0.47</strong></td><td>same defect</td></tr>
+<tr><td><code>table_mislabeled_as_picture.pdf</code></td><td>content 0.97, order <strong>0.49</strong></td><td>the textbook case — the content is <em>there</em>, the sequence is wrong</td></tr>
+<tr><td><code>xlsx_07_gap_tolerance_.xlsx</code></td><td>tables <strong>0.11</strong></td><td>one table dumped per sheet; separate logical tables not split on blank-row gaps</td></tr>
+<tr><td><code>hyperlink_02.html</code></td><td>content 0.40</td><td>link handling</td></tr>
+</tbody>
+</table></div>
+
+<p>The three PDF rows were one bug, not three. <code>pdfPageText</code> ordered glyphs by Y descending then X ascending, which is correct for one column and wrong for two: on a two-column page it interleaves the columns line by line. A recursive XY-cut now replaces it — split a region on the widest low-ink vertical channel, recurse, and hand back the original glyph slice untouched when no column is found, so a single-column page renders through byte-identical code paths. PDF reading order went 0.70 to 0.77, with content unchanged on all 15 files, which is exactly what distinguishes a reading-order defect from a content-loss one.</p>
+
+<p>The two <code>docx</code> rows were the more serious pair. A scrambled PDF is visibly degraded; a dropped text box is a document that silently converts to almost nothing at exit 0 — which is the failure mode this project criticises markitdown for elsewhere on this page. Word text boxes (<code>w:txbxContent</code>, both DrawingML and legacy VML), DrawingML canvas text and embedded charts are now extracted, content controls (<code>w:sdt</code>) are transparent, and single-cell wrapper tables are unwrapped: docx content 0.84 to 0.94, tables 0.89 to 0.98.</p>
+
+<p>The rest went the same way. HTML tables 0.69 to 0.99, after replacing a table plugin that bailed on tables with no <code>&lt;th&gt;</code> and emitted the cells as loose paragraphs — eight of the corpus's 22 tables came out as no table at all, at exit 0. xlsx tables 0.74 to 0.99 and content 0.87 to 0.98, by splitting a sheet into 4-connected regions instead of dumping it as one table. Aggregate content went 0.88 to 0.92, order 0.86 to 0.91, tables 0.75 to 0.87.</p>
+
+<p><code>table_misidentified_as_form.pdf</code> is the single declined file: a scanned PDF with no text layer, refused with <code>ErrNoTextLayer</code>. The <a href="./llm.html">vision-model path</a> handles it, but is opt-in and unconfigured here, which is why the refusal stands.</p>
+
+<h2 id="limits">What this still does not measure</h2>
+
+<p>The ground truth is docling's output, so "quality" here means agreement with docling. Where docling is itself wrong, matching it scores well — two of the corpus filenames (<code>table_misidentified_as_form</code>, <code>table_mislabeled_as_picture</code>) are docling's own record of getting a page wrong.</p>
+
+<p>It also says nothing about formats docling ships no pairs for: rss, msg, zip, ipynb, and images. See <a href="./formats.html">Formats</a> for what those converters do.</p>
+
+<h2 id="reproduce">Reproduce it</h2>
+
+<pre><code>git clone https://github.com/muthuishere/anymd
+cd anymd
+
+./bench/run.sh                             # needs uv, hyperfine and Go
+./bench/run-quality.sh /path/to/docling    # needs a docling checkout</code></pre>
+
+<p>Every number on this page came from those two scripts. The full write-up, including the raw tables, lives in <a href="https://github.com/muthuishere/anymd/blob/main/bench/README.md"><code>bench/README.md</code></a>.</p>
+
+<footer>
+  <p><a href="./">anymd</a> — any document to Markdown, in pure Go.
+  <a href="https://github.com/muthuishere/anymd">Source</a> ·
+  <a href="https://pkg.go.dev/github.com/muthuishere/anymd">pkg.go.dev</a></p>
+</footer>
+
+</div>
+</body>
+</html>

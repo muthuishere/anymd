@@ -1,8 +1,9 @@
 // Package llm gives anymd image captioning and OCR by handing images to a
 // vision model, the way markitdown's llm_client= parameter does.
 //
-// It is a separate Go module: `go get github.com/muthuishere/anymd` stays
-// dependency-light, and you pull this only if you want it.
+// It is a subpackage of anymd, so `go get github.com/muthuishere/anymd` brings
+// it along. Nothing here runs unless you construct a client and pass it in
+// Options.Describer — the default build still makes no network call.
 //
 //	// markitdown (Python):
 //	//   md = MarkItDown(llm_client=OpenAI(), llm_model="gpt-4o")
