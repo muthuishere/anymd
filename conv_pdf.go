@@ -306,35 +306,51 @@ func pdfPageText(p pdf.Page, budget *int) (out string) {
 
 	var prev pdf.Text
 	var prevEnd float64
+	var prevBot float64
 	first := true
-	for _, ch := range chars {
-		size := ch.FontSize
-		if size <= 0 {
-			size = prev.FontSize
+	for ri, run := range pdfReadingOrder(chars) {
+		if len(run) == 0 {
+			continue
 		}
-		if size <= 0 {
-			size = 1
+		if ri > 0 && pdfRunTop(run) > prevBot {
+			// This run starts higher up the page than the last one ended, so
+			// the pen has jumped back to the top of a new column rather than
+			// carried on down the page. That is a hard break: the glyph loop's
+			// own rules compare a downward gap and would read the jump as a
+			// continuation of the previous sentence.
+			flushPara()
+			first = true
 		}
-		if first {
-			first = false
-		} else if ch.Y != prev.Y {
-			// New line. A gap much larger than a line height reads as a
-			// paragraph break; anything smaller is just the next line.
-			if prev.Y-ch.Y > 1.8*size {
-				flushPara()
-			} else {
-				flushLine()
+		for _, ch := range run {
+			size := ch.FontSize
+			if size <= 0 {
+				size = prev.FontSize
 			}
-			prevEnd = ch.X
-		} else if ch.X-prevEnd > 0.25*size {
-			// Same line, but the pen jumped: that jump was a space.
-			line.WriteString(" ")
+			if size <= 0 {
+				size = 1
+			}
+			if first {
+				first = false
+			} else if ch.Y != prev.Y {
+				// New line. A gap much larger than a line height reads as a
+				// paragraph break; anything smaller is just the next line.
+				if prev.Y-ch.Y > 1.8*size {
+					flushPara()
+				} else {
+					flushLine()
+				}
+				prevEnd = ch.X
+			} else if ch.X-prevEnd > 0.25*size {
+				// Same line, but the pen jumped: that jump was a space.
+				line.WriteString(" ")
+			}
+			line.WriteString(ch.S)
+			prev = ch
+			if end := ch.X + ch.W; end > prevEnd {
+				prevEnd = end
+			}
 		}
-		line.WriteString(ch.S)
-		prev = ch
-		if end := ch.X + ch.W; end > prevEnd {
-			prevEnd = end
-		}
+		prevBot = pdfRunBottom(run)
 	}
 	flushPara()
 
@@ -789,4 +805,556 @@ func pdfDictFilters(dict []byte) []string {
 		}
 	}
 	return names
+}
+
+// --- Reading order: recursive XY-cut over line boxes -----------------------
+//
+// Sorting glyphs by Y descending then X ascending is correct for one column
+// and wrong for two. On a two-column page it interleaves the columns line by
+// line: every token survives, in nonsense order, which is exactly the
+// content-high / order-low signature bench/quality.py reports for the arXiv
+// papers in docling's corpus.
+//
+// The fix is geometric and needs no model. docling's ReadingOrderPredictor
+// (docling/models/postprocessing/reading_order_rb.py) builds bounding boxes for
+// text blocks, establishes adjacency between them, dilates horizontally so
+// fragments of one column merge, and walks the resulting graph. The same
+// structure falls out of the classic recursive XY-cut, which is what this is:
+// group glyphs into lines, cut the page at horizontal whitespace bands that run
+// its full width, then cut each band at the vertical gutters its text projects
+// around, and recurse. A full-width title above a two-column body is one band
+// that does not split vertically followed by one that does, so it lands in the
+// right place without being special-cased.
+//
+// The conservative half matters as much as the clever half: when no column is
+// found, pdfReadingOrder hands back the original glyph slice untouched, so a
+// single-column page renders through byte-identical code paths to before.
+
+// pdfLineTol groups glyphs onto one baseline. It is a fraction of the glyph's
+// own font size, not a pixel count: a 6pt footnote and a 24pt heading have very
+// different ideas of how far off the baseline a superscript sits.
+const pdfLineTol = 0.5
+
+// pdfBandGap is the vertical whitespace, in multiples of the line's font size,
+// that separates two horizontal bands. It matches the renderer's own
+// paragraph-break threshold so a band boundary is always somewhere the output
+// already had a blank line.
+const pdfBandGap = 1.8
+
+// pdfFragGap is the horizontal jump, in multiples of the font size, that ends a
+// line fragment. It is deliberately low — barely wider than a stretched word
+// space in justified text — because fragmenting too eagerly costs nothing: a
+// spurious gap has to fall at the same X on every line of the region before the
+// projection profile below will mistake it for a gutter.
+const pdfFragGap = 0.8
+
+// pdfMinColumnLines is the smallest number of lines a region must hold before
+// we will look for columns in it. Below this there is not enough evidence to
+// tell a column gutter from the space between two words.
+const pdfMinColumnLines = 6
+
+// pdfMaxColumns caps how many columns one region may split into. A region that
+// appears to have more is almost always a table about to be read cell by cell,
+// which would scramble rows that were already in the right order.
+const pdfMaxColumns = 3
+
+// pdfGutterTolDiv sets how many of a region's baselines may cross a gutter and
+// still leave it a gutter: one in this many. It is not zero because a real
+// two-column page does not offer an empty channel — a gutter is often barely
+// wider than a word space, and lines that end in a long word run right up to
+// its edge. Demanding an empty channel finds no columns on pages a reader has
+// no trouble with at all.
+const pdfGutterTolDiv = 3
+
+// pdfMaxProfileBins bounds the vertical projection profile. A page is a few
+// hundred points wide, so this is generous; it exists so a document declaring a
+// mile-wide MediaBox cannot size an allocation.
+const pdfMaxProfileBins = 4096
+
+// pdfMaxCutDepth bounds the XY-cut recursion. The cut strictly shrinks its
+// input, so this is belt and braces against a pathological page rather than a
+// termination condition.
+const pdfMaxCutDepth = 12
+
+// pdfLine is one visually contiguous baseline of glyphs, held as a subslice of
+// the page's sorted glyph array so grouping costs no copies.
+type pdfLine struct {
+	chars []pdf.Text
+	x0    float64 // leftmost glyph origin
+	x1    float64 // rightmost glyph advance end
+	yTop  float64 // highest baseline on the line
+	yBot  float64 // lowest baseline on the line
+	size  float64 // largest font size on the line
+}
+
+// pdfReadingOrder splits the page's glyphs into runs to be emitted one after
+// another. The single-run result is the input slice itself, which is both the
+// fast path and the guarantee that a page with no column structure renders
+// exactly as it did before this analysis existed.
+func pdfReadingOrder(chars []pdf.Text) [][]pdf.Text {
+	one := [][]pdf.Text{chars}
+	if len(chars) < 2 {
+		return one
+	}
+	lines := pdfGroupLines(chars)
+	if len(lines) < pdfMinColumnLines {
+		return one
+	}
+	var c pdfCutter
+	c.cut(lines, 0)
+	if !c.columns || len(c.runs) < 2 {
+		return one
+	}
+	out := make([][]pdf.Text, 0, len(c.runs))
+	for _, run := range c.runs {
+		n := 0
+		for _, l := range run {
+			n += len(l.chars)
+		}
+		g := make([]pdf.Text, 0, n)
+		for _, l := range run {
+			g = append(g, l.chars...)
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
+// pdfGroupLines collects the Y-sorted glyphs into line fragments: a run of
+// glyphs on one baseline with no large horizontal jump inside it.
+//
+// Fragmenting on the horizontal jump is what makes the whole cut possible. A
+// two-column page usually sets both columns on the same grid, so the two
+// columns' text sits on shared baselines; grouping purely by Y would produce
+// "lines" that stretch across the gutter and cover the very gap the column cut
+// is looking for. Splitting at the jump gives one box per column per baseline —
+// docling's text cells — which the cut then reassembles into columns.
+//
+// Fragments are contiguous subslices of the page's sorted glyphs, so grouping
+// costs no copies and concatenating them back in order reproduces the input.
+func pdfGroupLines(chars []pdf.Text) []pdfLine {
+	lines := make([]pdfLine, 0, 64)
+	lo, ink := 0, false
+	var cur pdfLine
+	for i, ch := range chars {
+		size := ch.FontSize
+		if size <= 0 {
+			size = cur.size
+		}
+		if size <= 0 {
+			size = 1
+		}
+		blank := pdfIsBlank(ch.S)
+		if i > lo && (cur.yBot-ch.Y > pdfLineTol*size ||
+			(!blank && ink && (ch.X-cur.x1 > pdfFragGap*size || ch.X+ch.W < cur.x0))) {
+			cur.chars = chars[lo:i]
+			lines = append(lines, cur)
+			lo, ink, cur = i, false, pdfLine{}
+		}
+		if i == lo {
+			cur = pdfLine{yTop: ch.Y, yBot: ch.Y, x0: ch.X, x1: ch.X + ch.W, size: size}
+		}
+		if ch.Y < cur.yBot {
+			cur.yBot = ch.Y
+		}
+		if ch.Y > cur.yTop {
+			cur.yTop = ch.Y
+		}
+		// A trailing space is not ink. Justified text pads its lines with them,
+		// and letting them widen the box closes the very gutter the cut needs
+		// to see.
+		if !blank {
+			if !ink || ch.X < cur.x0 {
+				cur.x0 = ch.X
+			}
+			if e := ch.X + ch.W; !ink || e > cur.x1 {
+				cur.x1 = e
+			}
+			ink = true
+		}
+		if size > cur.size {
+			cur.size = size
+		}
+	}
+	cur.chars = chars[lo:]
+	return append(lines, cur)
+}
+
+// pdfIsBlank reports whether a glyph carries no ink.
+func pdfIsBlank(s string) bool {
+	return strings.TrimSpace(s) == ""
+}
+
+// pdfCutter accumulates the leaves of the XY-cut in reading order and records
+// whether any vertical (column) cut was actually made — the flag that decides
+// whether the page is reordered at all.
+type pdfCutter struct {
+	runs    [][]pdfLine
+	columns bool
+}
+
+// cut recursively splits a region: horizontal bands first, so a full-width
+// heading is separated from the columns beneath it before we go looking for a
+// gutter that the heading itself would have covered.
+func (c *pdfCutter) cut(lines []pdfLine, depth int) {
+	if len(lines) == 0 {
+		return
+	}
+	if depth < pdfMaxCutDepth && len(lines) > 1 {
+		if bands := pdfSplitBands(lines); len(bands) > 1 {
+			for _, b := range bands {
+				c.cut(b, depth+1)
+			}
+			return
+		}
+		if cols := pdfSplitColumns(lines); len(cols) > 1 {
+			c.columns = true
+			for _, col := range cols {
+				c.cut(col, depth+1)
+			}
+			return
+		}
+	}
+	c.runs = append(c.runs, lines)
+}
+
+// pdfSplitBands cuts a region at full-width horizontal whitespace. Lines arrive
+// in Y-descending order, so a band is a contiguous stretch of them.
+func pdfSplitBands(lines []pdfLine) [][]pdfLine {
+	var out [][]pdfLine
+	start := 0
+	for i := 1; i < len(lines); i++ {
+		if lines[i-1].yBot-lines[i].yTop > pdfBandGap*lines[i].size {
+			out = append(out, lines[start:i])
+			start = i
+		}
+	}
+	if start == 0 {
+		return nil
+	}
+	return append(out, lines[start:])
+}
+
+// pdfSplitColumns cuts a region at its vertical gutters — the stretches of X
+// that almost no line of the region occupies, which is the flat floor of the
+// text's vertical projection profile.
+//
+// The profile is counted per baseline and read with a tolerance rather than
+// demanding a stretch of X that is completely empty. Real two-column pages do
+// not offer one: a gutter is often barely wider than a word space, and a
+// handful of lines in any column will run right up to its edge. Requiring an
+// exactly empty gap finds no gutter at all on a page a reader has no trouble
+// with. Lines that do cross the chosen gutter are cut at it, which is where
+// they were always meant to be divided.
+//
+// Everything after the profile is there to keep a table from being read cell by
+// cell, which would scramble far more than the interleaving this fixes. A
+// table's inter-cell whitespace is a genuine gutter, so geometry alone cannot
+// separate the two; what separates them is that prose columns are tall, few,
+// wide, and full of lines that reach the column's right edge.
+func pdfSplitColumns(lines []pdfLine) [][]pdfLine {
+	if len(lines) < pdfMinColumnLines {
+		return nil
+	}
+	x0, x1 := lines[0].x0, lines[0].x1
+	yTop, yBot := lines[0].yTop, lines[0].yBot
+	for _, l := range lines[1:] {
+		if l.x0 < x0 {
+			x0 = l.x0
+		}
+		if l.x1 > x1 {
+			x1 = l.x1
+		}
+		if l.yTop > yTop {
+			yTop = l.yTop
+		}
+		if l.yBot < yBot {
+			yBot = l.yBot
+		}
+	}
+	width := x1 - x0
+	med := pdfMedianSize(lines)
+	// The bounds come from the file and are attacker-controlled: reject a
+	// width that is not a sane finite number rather than sizing a histogram
+	// from it. The negated form is deliberate — it rejects NaN too.
+	if !(width > 0 && width < 1e9) || med <= 0 {
+		return nil
+	}
+	// A region only a few lines tall is a table row, a heading block or a
+	// caption, never a multi-column layout worth reordering.
+	if yTop-yBot < 5*med {
+		return nil
+	}
+	minGutter := 0.6 * med
+	if w := 0.015 * width; w > minGutter {
+		minGutter = w
+	}
+
+	// Bin the region's width finely enough to resolve a gutter and no finer, so
+	// the histogram is bounded whatever the page size.
+	bins := int(width / (0.25 * med))
+	if bins < 8 {
+		return nil
+	}
+	if bins > pdfMaxProfileBins {
+		bins = pdfMaxProfileBins
+	}
+	binW := width / float64(bins)
+	cov := make([]int, bins)
+	seen := make([]int, bins)
+	baselines := 0
+	for i := 0; i < len(lines); {
+		baselines++
+		j := i
+		for ; j < len(lines); j++ {
+			if lines[i].yBot-lines[j].yTop > pdfLineTol*lines[j].size {
+				break
+			}
+		}
+		for _, l := range lines[i:j] {
+			lo := int((l.x0 - x0) / binW)
+			hi := int((l.x1 - x0) / binW)
+			if lo < 0 {
+				lo = 0
+			}
+			if hi >= bins {
+				hi = bins - 1
+			}
+			for b := lo; b <= hi; b++ {
+				if seen[b] != baselines {
+					seen[b] = baselines
+					cov[b]++
+				}
+			}
+		}
+		i = j
+	}
+	tol := baselines / pdfGutterTolDiv
+
+	// A gutter is a run of bins almost nothing crosses, wide enough to be a
+	// gutter and far enough from the edges to leave a column on each side.
+	edge := 0.10 * width
+	type gutter struct{ mid, w float64 }
+	found := make([]gutter, 0, 8)
+	for b := 0; b < bins; {
+		if cov[b] > tol {
+			b++
+			continue
+		}
+		e := b
+		for e < bins && cov[e] <= tol {
+			e++
+		}
+		lo, hi := x0+float64(b)*binW, x0+float64(e)*binW
+		if hi-lo >= minGutter && lo-x0 > edge && x1-hi > edge {
+			found = append(found, gutter{(lo + hi) / 2, hi - lo})
+		}
+		b = e
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	// Try the widest gutters first and give up one at a time. A single wide
+	// channel is often reported as two valleys either side of one stray line,
+	// and taking both would manufacture a sliver of a middle column that no
+	// guard would accept — while the widest one alone is the real boundary.
+	sort.SliceStable(found, func(a, b int) bool { return found[a].w > found[b].w })
+	n := len(found)
+	if n > pdfMaxColumns-1 {
+		n = pdfMaxColumns - 1
+	}
+	cuts := make([]float64, n)
+	for ; n > 0; n-- {
+		cuts = cuts[:n]
+		for i := range cuts {
+			cuts[i] = found[i].mid
+		}
+		sort.Float64s(cuts)
+		if groups := pdfGroupColumns(lines, cuts, width, med); groups != nil {
+			return groups
+		}
+	}
+	return nil
+}
+
+// pdfGroupColumns applies one candidate set of cuts and returns the columns it
+// makes, or nil when any of them fails to look like a column of prose.
+func pdfGroupColumns(lines []pdfLine, cuts []float64, width, med float64) [][]pdfLine {
+	groups := make([][]pdfLine, len(cuts)+1)
+	for _, l := range lines {
+		for _, part := range pdfCutLine(l, cuts) {
+			g := pdfColumnOf(part.x0, cuts)
+			groups[g] = append(groups[g], part)
+		}
+	}
+	for _, g := range groups {
+		if !pdfLooksLikeColumn(g, width, med) {
+			return nil
+		}
+	}
+	return groups
+}
+
+// pdfCutLine divides one line at every gutter it crosses. A line that stretches
+// across the gutter is two columns' text that the fragmenting pass could not
+// separate, because the two happened to meet with less than a word space
+// between them; the profile has since found the boundary they share.
+func pdfCutLine(l pdfLine, cuts []float64) []pdfLine {
+	at := -1
+	for _, c := range cuts {
+		if l.x0 < c && l.x1 > c {
+			at = pdfSplitIndex(l.chars, c)
+			if at > 0 && at < len(l.chars) {
+				break
+			}
+			at = -1
+		}
+	}
+	if at < 0 {
+		return []pdfLine{l}
+	}
+	left := pdfLineOf(l.chars[:at])
+	right := pdfCutLine(pdfLineOf(l.chars[at:]), cuts)
+	return append([]pdfLine{left}, right...)
+}
+
+// pdfSplitIndex is the first glyph at or past x. Glyphs within a fragment share
+// a baseline and run left to right, so one index divides the fragment.
+func pdfSplitIndex(chars []pdf.Text, x float64) int {
+	for i, ch := range chars {
+		if ch.X >= x {
+			return i
+		}
+	}
+	return len(chars)
+}
+
+// pdfLineOf recomputes a line's box from its glyphs, ignoring blanks so a
+// trailing space never widens it back over a gutter.
+func pdfLineOf(chars []pdf.Text) pdfLine {
+	l := pdfLine{chars: chars, yTop: chars[0].Y, yBot: chars[0].Y,
+		x0: chars[0].X, x1: chars[0].X + chars[0].W}
+	ink := false
+	for _, ch := range chars {
+		if ch.Y < l.yBot {
+			l.yBot = ch.Y
+		}
+		if ch.Y > l.yTop {
+			l.yTop = ch.Y
+		}
+		if ch.FontSize > l.size {
+			l.size = ch.FontSize
+		}
+		if pdfIsBlank(ch.S) {
+			continue
+		}
+		if !ink || ch.X < l.x0 {
+			l.x0 = ch.X
+		}
+		if e := ch.X + ch.W; !ink || e > l.x1 {
+			l.x1 = e
+		}
+		ink = true
+	}
+	if l.size <= 0 {
+		l.size = 1
+	}
+	return l
+}
+
+// pdfColumnOf places a line by its left edge. The sweep guarantees no line
+// straddles a cut, so the left edge decides the whole line.
+func pdfColumnOf(x float64, cuts []float64) int {
+	for i, c := range cuts {
+		if x <= c {
+			return i
+		}
+	}
+	return len(cuts)
+}
+
+// pdfLooksLikeColumn is the table guard. A column of prose is a decent slice of
+// the region's width, holds several lines, and has lines that run right out to
+// its edge — justified or ragged-right body text fills the measure. A table
+// column is narrow, or short, or made of cells that stop well short of it.
+func pdfLooksLikeColumn(g []pdfLine, regionWidth, med float64) bool {
+	if len(g) < 3 {
+		return false
+	}
+	gx0, gx1 := g[0].x0, g[0].x1
+	for _, l := range g[1:] {
+		if l.x0 < gx0 {
+			gx0 = l.x0
+		}
+		if l.x1 > gx1 {
+			gx1 = l.x1
+		}
+	}
+	w := gx1 - gx0
+	if w < 0.15*regionWidth || w < 8*med {
+		return false
+	}
+	// Measure fill per baseline, not per fragment: a justified line broken into
+	// three fragments by wide word spaces still reaches the column's edge, and
+	// judging its pieces individually would call every column a table.
+	full, lo, hi := 0, g[0].x0, g[0].x1
+	yb := g[0].yBot
+	for _, l := range g[1:] {
+		if yb-l.yTop > pdfLineTol*l.size {
+			if hi-lo >= 0.75*w {
+				full++
+			}
+			lo, hi = l.x0, l.x1
+		}
+		if l.x0 < lo {
+			lo = l.x0
+		}
+		if l.x1 > hi {
+			hi = l.x1
+		}
+		yb = l.yBot
+	}
+	if hi-lo >= 0.75*w {
+		full++
+	}
+	return full >= 2
+}
+
+// pdfMedianSize is the region's typical font size, used to scale every
+// threshold in the cut so nothing is expressed in absolute points.
+func pdfMedianSize(lines []pdfLine) float64 {
+	sizes := make([]float64, 0, len(lines))
+	for _, l := range lines {
+		if l.size > 0 {
+			sizes = append(sizes, l.size)
+		}
+	}
+	if len(sizes) == 0 {
+		return 0
+	}
+	sort.Float64s(sizes)
+	return sizes[len(sizes)/2]
+}
+
+// pdfRunTop and pdfRunBottom are the highest and lowest baselines in an emitted
+// run. The renderer compares them across runs to tell "carried on down the
+// page" from "jumped back up to the next column".
+func pdfRunTop(run []pdf.Text) float64 {
+	y := run[0].Y
+	for _, ch := range run[1:] {
+		if ch.Y > y {
+			y = ch.Y
+		}
+	}
+	return y
+}
+
+func pdfRunBottom(run []pdf.Text) float64 {
+	y := run[0].Y
+	for _, ch := range run[1:] {
+		if ch.Y < y {
+			y = ch.Y
+		}
+	}
+	return y
 }

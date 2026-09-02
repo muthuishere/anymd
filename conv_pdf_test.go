@@ -606,3 +606,154 @@ func TestPDFScanImagesSurvivesHostileBytes(t *testing.T) {
 		}
 	}
 }
+
+// pdfPad makes every line of a synthetic column the same width, so the column
+// looks like set prose rather than a stack of ragged fragments. The fixture
+// font is Helvetica with every glyph 500/1000 em, so at 12pt one character is
+// exactly 6 points and a 24-character line is 144 points wide.
+func pdfPad(s string) string {
+	if len(s) > 24 {
+		return s[:24]
+	}
+	return s + strings.Repeat("x", 24-len(s))
+}
+
+// TestPDFTwoColumnReadingOrder is the regression test for the defect the
+// quality benchmark named: glyphs sorted by Y then X interleave a two-column
+// page line by line, keeping every token and scrambling the sequence.
+//
+// The fixture is a real two-column page — two 144pt columns either side of a
+// 124pt gutter, six shared baselines — so the whole column must be emitted
+// before the second one starts.
+func TestPDFTwoColumnReadingOrder(t *testing.T) {
+	left := []string{"Left one", "Left two", "Left three", "Left four", "Left five", "Left six"}
+	right := []string{"Right one", "Right two", "Right three", "Right four", "Right five", "Right six"}
+
+	var items [][3]string
+	for i := range left {
+		y := fmt.Sprint(700 - 14*i)
+		// Interleaved in the content stream exactly as a producer emits them:
+		// left cell, right cell, next baseline.
+		items = append(items, [3]string{"72", y, pdfPad(left[i])})
+		items = append(items, [3]string{"340", y, pdfPad(right[i])})
+	}
+
+	res, err := (&PDFConverter{}).Convert(
+		bytes.NewReader(buildPDF([]string{textPage(items...)}, "")),
+		StreamInfo{Extension: ".pdf"}, &Options{})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+
+	var want strings.Builder
+	for _, s := range left {
+		want.WriteString(pdfPad(s) + "\n")
+	}
+	want.WriteString("\n")
+	for _, s := range right {
+		want.WriteString(pdfPad(s) + "\n")
+	}
+	if res.Markdown != want.String() {
+		t.Fatalf("two-column reading order wrong\n got: %q\nwant: %q", res.Markdown, want.String())
+	}
+}
+
+// TestPDFSingleColumnUnchangedByColumnDetection pins the other half of the
+// contract: a page with no column structure must come out exactly as it did
+// before any reading-order analysis existed, down to the byte.
+func TestPDFSingleColumnUnchangedByColumnDetection(t *testing.T) {
+	lines := []string{
+		"The first line of a single",
+		"column page which runs on",
+		"for several lines so that",
+		"the column detector has a",
+		"tall region to look at and",
+		"still finds no gutter here",
+		"because there is only one",
+		"column of text on the page",
+	}
+	var items [][3]string
+	for i, s := range lines {
+		items = append(items, [3]string{"72", fmt.Sprint(700 - 14*i), s})
+	}
+
+	res, err := (&PDFConverter{}).Convert(
+		bytes.NewReader(buildPDF([]string{textPage(items...)}, "")),
+		StreamInfo{Extension: ".pdf"}, &Options{})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	want := strings.Join(lines, "\n") + "\n"
+	if res.Markdown != want {
+		t.Fatalf("single-column output moved\n got: %q\nwant: %q", res.Markdown, want)
+	}
+}
+
+// TestPDFNarrowColumnsAreNotSplit guards the expensive failure mode of a
+// column cut: a table's inter-cell whitespace is a real gutter, and reading it
+// as columns would emit every left cell then every right cell, scrambling rows
+// that were in the right order to begin with. Narrow, short cells fail the
+// column test, so the rows are left alone.
+func TestPDFNarrowColumnsAreNotSplit(t *testing.T) {
+	rows := [][2]string{
+		{"Widget", "12"}, {"Gadget", "34"}, {"Sprocket", "56"},
+		{"Flange", "78"}, {"Bracket", "90"}, {"Grommet", "11"},
+	}
+	var items [][3]string
+	for i, r := range rows {
+		y := fmt.Sprint(700 - 14*i)
+		items = append(items, [3]string{"72", y, r[0]})
+		items = append(items, [3]string{"300", y, r[1]})
+	}
+
+	res, err := (&PDFConverter{}).Convert(
+		bytes.NewReader(buildPDF([]string{textPage(items...)}, "")),
+		StreamInfo{Extension: ".pdf"}, &Options{})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	var want strings.Builder
+	for _, r := range rows {
+		want.WriteString(r[0] + " " + r[1] + "\n")
+	}
+	if res.Markdown != want.String() {
+		t.Fatalf("table rows were split into columns\n got: %q\nwant: %q",
+			res.Markdown, want.String())
+	}
+}
+
+// TestPDFHeadingAboveTwoColumnsStaysFirst checks the cut's other axis: a
+// full-width line above a two-column body is separated by the horizontal band
+// cut before the vertical cut runs, so it is emitted first rather than being
+// torn in half by the gutter beneath it.
+func TestPDFHeadingAboveTwoColumnsStaysFirst(t *testing.T) {
+	heading := "A full width heading across the whole page"
+	items := [][3]string{{"72", "740", heading}}
+	left := []string{"Left one", "Left two", "Left three", "Left four", "Left five", "Left six"}
+	right := []string{"Right one", "Right two", "Right three", "Right four", "Right five", "Right six"}
+	for i := range left {
+		y := fmt.Sprint(690 - 14*i)
+		items = append(items, [3]string{"72", y, pdfPad(left[i])})
+		items = append(items, [3]string{"340", y, pdfPad(right[i])})
+	}
+
+	res, err := (&PDFConverter{}).Convert(
+		bytes.NewReader(buildPDF([]string{textPage(items...)}, "")),
+		StreamInfo{Extension: ".pdf"}, &Options{})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	var want strings.Builder
+	want.WriteString(heading + "\n\n")
+	for _, s := range left {
+		want.WriteString(pdfPad(s) + "\n")
+	}
+	want.WriteString("\n")
+	for _, s := range right {
+		want.WriteString(pdfPad(s) + "\n")
+	}
+	if res.Markdown != want.String() {
+		t.Fatalf("heading above columns misplaced\n got: %q\nwant: %q",
+			res.Markdown, want.String())
+	}
+}
