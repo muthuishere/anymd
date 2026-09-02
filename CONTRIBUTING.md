@@ -101,7 +101,7 @@ attacker-controlled.
   converter takes down the caller's process; anymd is a *library* first, so
   that is somebody's production server.
 - **Wrap third-party parsers in `recover()`.** We do not control what
-  `ledongthuc/pdf`, `extrame/xls`, or the EXIF decoders do on a malformed
+  `internal/pdf`, `extrame/xls`, or the EXIF decoders do on a malformed
   document. Convert their panic into an error at your converter's boundary and
   return a useful message.
 - **No network, no subprocess, no shell, ever.** Not for a remote image, not

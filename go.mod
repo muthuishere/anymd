@@ -6,7 +6,6 @@ require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
 	github.com/dsoprea/go-exif/v3 v3.0.1
 	github.com/extrame/xls v0.0.1
-	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/mmcdole/gofeed v1.4.2
 	github.com/muthuishere/toolnexus/golang v0.16.0
 	github.com/richardlehane/mscfb v1.0.8

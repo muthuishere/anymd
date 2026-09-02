@@ -116,6 +116,30 @@ linters:
       - comments
       - std-error-handling
     rules:
+      # internal/pdf is vendored third-party code (see its README): a fork of
+      # rsc.io/pdf carrying one deliberate local change. Linting it would
+      # report upstream's decisions as our defects, and every fix we applied
+      # would be a conflict the next time we rebase onto upstream. The code we
+      # own there is the object cache, and it is reviewed as a diff.
+      - path: internal/pdf/
+        linters:
+          - errcheck
+          - gosec
+          - gocritic
+          - govet
+          - ineffassign
+          - misspell
+          - revive
+          - staticcheck
+          - unused
+
+      # bench/ is developer tooling, not shipped code: it reads a corpus
+      # directory the developer names on the command line, which is the same
+      # "opens a file named by a variable" shape G304 is already excluded for.
+      - path: bench/
+        linters:
+          - gosec
+
       # Test helpers ignore errors on purpose: a fixture that fails to build
       # fails the assertion on the very next line.
       - path: _test\.go

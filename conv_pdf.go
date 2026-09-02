@@ -13,9 +13,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ledongthuc/pdf"
-
 	"github.com/muthuishere/anymd/internal/mdutil"
+	"github.com/muthuishere/anymd/internal/pdf"
 )
 
 func init() { addBuiltin(&PDFConverter{}) }
@@ -77,7 +76,7 @@ func (c *PDFConverter) Accepts(r io.ReadSeeker, info StreamInfo, opts *Options) 
 
 // Convert extracts the text layer page by page.
 //
-// The whole body runs under a recover: ledongthuc/pdf reports malformed
+// The whole body runs under a recover: internal/pdf reports malformed
 // structure by panicking (see its errorf), and this package's contract is that
 // hostile bytes produce an error, never a crash in the caller's process.
 func (c *PDFConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options) (res Result, err error) {
