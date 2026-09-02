@@ -487,3 +487,61 @@ func TestXLSHasBookStreamShortInput(t *testing.T) {
 		}
 	}
 }
+
+// TestXLSSplitsRegionsLikeXlsx: the legacy path runs the same region splitter,
+// because the invariant this package cares about is that `anymd book.xls` and
+// `anymd book.xlsx` are the same bytes for the same data. Splitting on blank
+// rows and columns in only one of them would break that outright.
+func TestXLSSplitsRegionsLikeXlsx(t *testing.T) {
+	book := buildXLS(t, []xlsSheetSpec{{
+		Name: "S",
+		Rows: [][]any{
+			{"Title", nil, nil},
+			{nil, nil, nil},
+			{"H1", nil, "R1"},
+			{"a", nil, "b"},
+		},
+	}})
+	res, err := (&XLSConverter{}).Convert(bytes.NewReader(book), StreamInfo{Extension: ".xls"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "## S\n\n" +
+		"| Title |\n| --- |\n\n" +
+		"| H1 |\n| --- |\n| a |\n\n" +
+		"| R1 |\n| --- |\n| b |\n"
+	if res.Markdown != want {
+		t.Fatalf("markdown mismatch\ngot:\n%q\nwant:\n%q", res.Markdown, want)
+	}
+}
+
+// TestXLSMatchesXlsxByteForByte is the invariant itself, exercised on the same
+// layout through both converters: a sheet with two blocks separated by a blank
+// row, built once as BIFF and once as OOXML.
+func TestXLSMatchesXlsxByteForByte(t *testing.T) {
+	rows := [][]string{
+		{"Header", "Second"},
+		{"1", "2"},
+		{"", ""},
+		{"Note", ""},
+	}
+	anyRows := make([][]any, len(rows))
+	for i, r := range rows {
+		anyRows[i] = make([]any, len(r))
+		for j, v := range r {
+			if v != "" {
+				anyRows[i][j] = v
+			}
+		}
+	}
+
+	book := buildXLS(t, []xlsSheetSpec{{Name: "Sheet1", Rows: anyRows}})
+	fromXLS, err := (&XLSConverter{}).Convert(bytes.NewReader(book), StreamInfo{Extension: ".xls"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromXlsx := xlsxConvert(t, xlsxSheet{name: "Sheet1", rows: xlsxRowsXML(rows)})
+	if fromXLS.Markdown != fromXlsx {
+		t.Fatalf("the two Excel paths disagree\n xls: %q\nxlsx: %q", fromXLS.Markdown, fromXlsx)
+	}
+}

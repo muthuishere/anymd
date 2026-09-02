@@ -51,8 +51,11 @@ var xlsBookStreams = []string{"Workbook", "Book"}
 // the workbook's own sheet order, each under an "## SheetName" heading.
 //
 // Its output shape is deliberately identical to XlsxConverter's — same
-// heading level, same trailing-blank trimming, same cell cap — so a reader
-// cannot tell which of the two Excel formats a document came from.
+// heading level, same trailing-blank trimming, same cell cap, and the same
+// split of a sheet into one table per 4-connected region — so a reader cannot
+// tell which of the two Excel formats a document came from. BIFF's merged-cell
+// records are not exposed by the parser, so a legacy sheet's merges do not
+// join regions the way an .xlsx's do; everything else is shared code.
 type XLSConverter struct{}
 
 // Name identifies the converter in errors and in `anymd --list`.
@@ -214,10 +217,16 @@ func (c *XLSConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options) 
 		if len(grid) == 0 || width == 0 {
 			continue // an entirely empty sheet emits nothing, not a bare heading
 		}
-		blocks = append(blocks,
-			mdutil.Heading(2, sh.Name),
-			mdutil.Table(grid[0], grid[1:]),
-		)
+		// Split on blank rows and columns exactly as the xlsx path does: the
+		// two Excel formats hold the same visual layouts, and a legacy sheet
+		// with a title block above a data grid must not come out as one welded
+		// table when its .xlsx twin comes out as two.
+		body := xlsxGridBlocks(xlsxModelFromGrid(grid, width))
+		if len(body) == 0 {
+			continue
+		}
+		blocks = append(blocks, mdutil.Heading(2, sh.Name))
+		blocks = append(blocks, body...)
 	}
 	return Result{Markdown: mdutil.Join(blocks...)}, nil
 }
