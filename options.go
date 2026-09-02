@@ -3,6 +3,7 @@ package anymd
 import (
 	"errors"
 	"io"
+	"time"
 )
 
 // ErrMaxDepth is returned when a container converter (zip, epub, mail with
@@ -22,6 +23,19 @@ type Options struct {
 
 	// Charset overrides the detected encoding for text-ish formats.
 	Charset string
+
+	// Describer, when non-nil, is used to caption images and to read pages that
+	// have no text layer. Nil (the default) means anymd makes NO network calls
+	// during conversion — see the Describer docs.
+	Describer Describer
+
+	// Transcriber, when non-nil, is used to convert audio to text. Nil (the
+	// default) means audio formats are unsupported.
+	Transcriber Transcriber
+
+	// LLMTimeout bounds a single Describer or Transcriber call. Zero means
+	// 60s. A slow model must not be able to stall a whole document.
+	LLMTimeout time.Duration
 
 	// engine and depth are engine-managed; converters read them through
 	// Recurse and never set them.
@@ -58,4 +72,12 @@ func (o *Options) Depth() int {
 		return 0
 	}
 	return o.depth
+}
+
+// llmTimeout returns the per-call budget for a Describer or Transcriber.
+func (o *Options) llmTimeout() time.Duration {
+	if o == nil || o.LLMTimeout <= 0 {
+		return 60 * time.Second
+	}
+	return o.LLMTimeout
 }
