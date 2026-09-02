@@ -78,6 +78,32 @@ treated as stable from `0.1.0` onward.
 
 ### Changed
 
+- **Output quality now leads markitdown on every aggregate metric**, measured on
+  docling's 130-document corpus (see [bench/](bench/)): content 0.88 -> **0.92**
+  (markitdown 0.91), order 0.86 -> **0.91** (0.88), tables 0.75 -> **0.87**
+  (0.85). anymd lost this benchmark when it was first written; it named the
+  defects and they were fixed.
+
+  - **html tables 0.69 -> 0.99.** `html-to-markdown/v2`'s table plugin bails on
+    tables with no `<th>` or with block content in a cell and emits the cells as
+    loose paragraphs — eight of the corpus's 22 tables came out as no table at
+    all, at exit 0. Replaced with our own grid walker rendering through
+    `mdutil.Table`. This is the shared HTML path, so RSS, EPUB and `.msg` gain
+    it too.
+  - **docx content 0.84 -> 0.94, tables 0.89 -> 0.98.** Word text boxes
+    (`w:txbxContent`, both DrawingML and legacy VML), DrawingML canvas text and
+    embedded charts were dropped entirely — `drawingml.docx` emitted 13 bytes at
+    exit 0. Content controls (`w:sdt`) are now transparent, which alone
+    recovered two named defects, and single-cell wrapper tables are unwrapped.
+  - **xlsx tables 0.74 -> 0.99, content 0.87 -> 0.98.** A sheet is split into
+    4-connected regions instead of being dumped as one table; merged cells
+    repeat across their span; section labels lift to prose; cell comments
+    (legacy and threaded) and chart sheets are extracted.
+  - **pdf reading order 0.70 -> 0.77.** A recursive XY-cut replaces
+    sort-by-Y-then-X, which interleaved the columns of a two-column page — every
+    token present, sequence scrambled. Content is unchanged on all 15 files,
+    which is what distinguishes a reading-order defect from a content-loss one.
+
 - **`--llm` costs money and sends document content to a third party.** One
   model call per captioned image, one per transcribed file. Guards are built in:
   identical images are deduplicated by sha256 (one logo across 60 slides is one

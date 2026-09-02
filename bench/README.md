@@ -139,8 +139,9 @@ Two things worth being precise about:
 Run it yourself: `./bench/run-quality.sh <path-to-a-docling-checkout>`.
 
 Every number above is a speed number, and speed is the easy one to win. This is
-the number that decides whether the output is worth having, and anymd currently
-**loses it**. The decision to measure it this way is
+the number that decides whether the output is worth having. anymd lost it when
+this benchmark was first written; the defects it named were then fixed, and
+anymd now leads every aggregate metric. The decision to measure it this way is
 [ADR 0003](../docs/adr/0003-quality-benchmark-against-docling.md).
 
 ### The corpus and the target
@@ -189,19 +190,23 @@ where the gap is more than a rounding difference.
 | format | n | content | order | tables | headings | lists |
 |---|---:|---:|---:|---:|---:|---:|
 | csv | 9 | **1.00** / 0.98 | **1.00** / 0.98 | **1.00** / 0.98 | 1.00 / 1.00 | 1.00 / 1.00 |
-| docx | 33 | 0.84 / **0.94** | 0.84 / **0.94** | 0.89 / **0.96** | **0.95** / 0.88 | 0.85 / 0.87 |
+| docx | 33 | 0.94 / 0.94 | 0.94 / 0.94 | **0.98** / 0.96 | **0.95** / 0.88 | **0.91** / 0.87 |
 | epub | 1 | 1.00 / 0.99 | 1.00 / 0.99 | 1.00 / 1.00 | 1.00 / 1.00 | 1.00 / 1.00 |
-| html | 32 | 0.95 / 0.96 | 0.95 / 0.96 | 0.69 / **0.98** | 1.00 / 1.00 | 0.94 / 0.94 |
+| html | 32 | **0.97** / 0.96 | **0.97** / 0.96 | **0.99** / 0.98 | 1.00 / 1.00 | 0.94 / 0.94 |
 | md | 10 | 0.97 / 0.97 | 0.97 / 0.97 | 0.87 / 0.87 | 0.92 / 0.92 | 0.78 / 0.78 |
 | odf (as pdf) | 6 | 0.64 / **0.94** | 0.60 / **0.82** | 0.17 / **0.38** | 0.17 / 0.17 | 0.56 / 0.56 |
-| pdf | 15 | 0.87 / 0.90 | 0.70 / 0.74 | 0.43 / **0.56** | 0.14 / 0.20 | 0.44 / 0.42 |
-| pptx | 8 | 0.80 / 0.82 | 0.77 / 0.82 | 0.98 / 0.95 | **1.00** / 0.86 | 0.56 / 0.57 |
-| xls | 1 | **0.95** / 0.68 | **0.95** / 0.68 | **0.64** / 0.41 | 1.00 / 1.00 | 1.00 / 1.00 |
-| xlsx | 11 | **0.87** / 0.68 | **0.83** / 0.65 | **0.74** / 0.60 | 0.95 / 1.00 | 1.00 / 1.00 |
-| **all** | **130** | 0.88 / **0.91** | 0.86 / **0.88** | 0.75 / **0.85** | **0.84** / 0.82 | 0.82 / 0.82 |
+| pdf | 15 | 0.87 / 0.90 | **0.77** / 0.74 | 0.43 / **0.56** | 0.14 / 0.20 | 0.44 / 0.42 |
+| pptx | 8 | 0.80 / 0.82 | 0.77 / 0.82 | **0.98** / 0.95 | **1.00** / 0.86 | 0.56 / 0.57 |
+| xls | 1 | **0.95** / 0.68 | **0.95** / 0.68 | **1.00** / 0.41 | 1.00 / 1.00 | 1.00 / 1.00 |
+| xlsx | 11 | **0.98** / 0.68 | **0.98** / 0.65 | **0.99** / 0.60 | 1.00 / 1.00 | 1.00 / 1.00 |
+| **all** | **130** | **0.92** / 0.91 | **0.91** / 0.88 | **0.87** / 0.85 | **0.84** / 0.82 | **0.83** / 0.82 |
 
-anymd wins the spreadsheet formats decisively — xlsx content **0.87 against
-0.68** — and csv outright. It loses docx, html tables, pdf, and the aggregate.
+anymd leads every aggregate metric. The spreadsheet lead is decisive — xlsx
+content **0.98 against 0.68**, tables **0.99 against 0.60**. It still trails on
+`odf` (which routes through the PDF converter), on PDF content, and on PDF
+tables and headings, where anymd emits almost none: `out_tables: 0` on every
+PDF is a missing feature, not a tuning problem, and it is the largest remaining
+gap on this benchmark.
 
 These numbers are unchanged by the vendored PDF parser of
 [ADR 0002](../docs/adr/0002-vendor-the-pdf-parser.md), which is the point: that
