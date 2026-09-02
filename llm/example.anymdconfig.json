@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy to ~/.config/anymd/anymdconfig.json. Every string field supports ${VAR} interpolation from the environment. NEVER put a literal API key here.",
+
+  "model": "openai/gpt-4o-mini",
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key": "${LLM_API_KEY}",
+
+  "proxy": "${HTTPS_PROXY}",
+  "headers": {
+    "HTTP-Referer": "${SITE_URL}"
+  },
+
+  "retries": 2,
+  "timeout_ms": 60000,
+  "anthropic": false,
+  "insecure_skip_verify": false
+}
