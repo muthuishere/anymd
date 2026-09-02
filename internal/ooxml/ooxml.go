@@ -17,6 +17,7 @@ import (
 	"io"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -368,3 +369,239 @@ func NewDecoder(data []byte) *xml.Decoder {
 	d.Entity = xml.HTMLEntity
 	return d
 }
+
+// --- chart parts ------------------------------------------------------------
+//
+// A chart is not stored as text anywhere a reader can see it: the live numbers
+// live in an embedded workbook, and all a pure-XML parse can recover is the
+// *cache* the producer wrote alongside the plot so the chart still renders
+// without opening the workbook. That cache is the only honest source, so a
+// chart with no cache degrades to its title rather than failing the document.
+//
+// docx and pptx embed identical chart parts (c:chart -> charts/chartN.xml), so
+// the parse lives here rather than in either converter.
+
+// ChartSeries is one c:ser reduced to the strings a text rendering needs.
+type ChartSeries struct {
+	Name string
+	Cats []string
+	Vals []string
+}
+
+// Chart is a chart part reduced to what a text rendering can honestly show.
+// Kind is the plot element's own name with the "Chart" suffix removed ("line",
+// "bar3D"), which is the only label a chart without a c:title has.
+type Chart struct {
+	Title  string
+	Kind   string
+	Series []ChartSeries
+}
+
+// maxChartPoints bounds a cached series: the idx attribute is attacker-
+// controlled, so a single <c:pt idx="4000000000"/> must not allocate a slice.
+const maxChartPoints = 100000
+
+// ParseChart pulls the title, the plot kind and every cached series out of a
+// chart part. The first c:title in document order is the chart title; the ones
+// that follow belong to the axes.
+func ParseChart(data []byte) (Chart, error) {
+	d := NewDecoder(data)
+	var (
+		ch    Chart
+		haveT bool
+	)
+	for {
+		tok, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return Chart{}, err
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch {
+		case se.Name.Local == "title":
+			if haveT {
+				continue
+			}
+			haveT = true
+			t, err := chartTitle(d)
+			if err != nil {
+				return Chart{}, err
+			}
+			ch.Title = t
+		case se.Name.Local == "ser":
+			s, err := chartSeries(d)
+			if err != nil {
+				return Chart{}, err
+			}
+			ch.Series = append(ch.Series, s)
+		case ch.Kind == "" && len(se.Name.Local) > len("Chart") &&
+			strings.HasSuffix(se.Name.Local, "Chart"):
+			ch.Kind = strings.TrimSuffix(se.Name.Local, "Chart")
+		}
+	}
+	return ch, nil
+}
+
+// chartTitle consumes a c:title and joins its a:t runs.
+func chartTitle(d *xml.Decoder) (string, error) {
+	var sb strings.Builder
+	depth := 1
+	for depth > 0 {
+		tok, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "t" {
+				s, err := TextOf(d)
+				if err != nil {
+					return "", err
+				}
+				sb.WriteString(s)
+				sb.WriteString(" ")
+				continue
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	return collapseSpace(sb.String()), nil
+}
+
+// chartSeries consumes one c:ser, reading its name from c:tx and its
+// categories and values from the c:cat / c:val caches.
+func chartSeries(d *xml.Decoder) (ChartSeries, error) {
+	var s ChartSeries
+	depth := 1
+	for depth > 0 {
+		tok, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return s, err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "tx":
+				pts, err := cachedPoints(d)
+				if err != nil {
+					return s, err
+				}
+				if len(pts) > 0 {
+					s.Name = pts[0]
+				}
+			case "cat":
+				pts, err := cachedPoints(d)
+				if err != nil {
+					return s, err
+				}
+				s.Cats = pts
+			case "val":
+				pts, err := cachedPoints(d)
+				if err != nil {
+					return s, err
+				}
+				s.Vals = pts
+			default:
+				depth++
+			}
+		case xml.EndElement:
+			depth--
+		}
+	}
+	return s, nil
+}
+
+// cachedPoints consumes an element and returns its <c:pt idx><c:v> values in
+// index order, with gaps left empty.
+func cachedPoints(d *xml.Decoder) ([]string, error) {
+	byIdx := map[int]string{}
+	maxIdx := -1
+	depth := 1
+	for depth > 0 {
+		tok, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "pt" {
+				idx, convErr := strconv.Atoi(strings.TrimSpace(Attr(t, "idx")))
+				if convErr != nil || idx < 0 || idx >= maxChartPoints {
+					idx = -1
+				}
+				v, err := pointValue(d)
+				if err != nil {
+					return nil, err
+				}
+				if idx >= 0 {
+					byIdx[idx] = v
+					if idx > maxIdx {
+						maxIdx = idx
+					}
+				}
+				continue
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	if maxIdx < 0 {
+		return nil, nil
+	}
+	out := make([]string, maxIdx+1)
+	for i := range out {
+		out[i] = byIdx[i]
+	}
+	return out, nil
+}
+
+// pointValue consumes a c:pt and returns its c:v text.
+func pointValue(d *xml.Decoder) (string, error) {
+	var sb strings.Builder
+	depth := 1
+	for depth > 0 {
+		tok, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "v" {
+				s, err := TextOf(d)
+				if err != nil {
+					return "", err
+				}
+				sb.WriteString(s)
+				continue
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	return collapseSpace(sb.String()), nil
+}
+
+// collapseSpace squeezes whitespace runs, so this package does not have to
+// import the Markdown emitters to hand back tidy strings.
+func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " ") }

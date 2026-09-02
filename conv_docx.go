@@ -62,6 +62,7 @@ func (c *DocxConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options)
 	}
 
 	dc := &docxCtx{
+		pkg:       pkg,
 		rels:      pkg.RelTargets(docxDocumentPart),
 		numbered:  docxNumberFormats(pkg.OptionalPart(docxNumberingPar)),
 		captioner: newOOXMLCaptioner(pkg, opts),
@@ -78,6 +79,7 @@ func (c *DocxConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options)
 
 // docxCtx carries the package-level lookups a body walk needs.
 type docxCtx struct {
+	pkg      *ooxml.Package    // for parts a body reference points at (charts)
 	rels     map[string]string // r:id -> hyperlink target AND r:embed -> media part
 	numbered map[string]bool   // "numId:ilvl" and "numId" -> is an ordered list
 
@@ -95,6 +97,29 @@ type docxCtx struct {
 	// to a GFM cell without either breaking the row or burying the prose, so a
 	// table image keeps its alt text and costs no model call.
 	inTable bool
+
+	// cell is the w:tc currently being walked, or nil outside a table. A cell
+	// needs two renderings of the same content — the flat text a GFM cell can
+	// hold, and the block rendering used when the table turns out to be a
+	// single-cell layout wrapper — and hanging it off the context is what lets
+	// one pass produce both.
+	cell *docxCellCtx
+
+	// tbDepth bounds text-box recursion. A text box holds ordinary paragraphs,
+	// which may hold further text boxes; the nesting is attacker-controlled, so
+	// it is bounded rather than trusted.
+	tbDepth int
+}
+
+// docxMaxTextboxDepth is how deep text boxes may nest before their content is
+// dropped. Real documents never exceed two.
+const docxMaxTextboxDepth = 8
+
+// docxCellCtx accumulates, while a w:tc is walked, the two things the cell's
+// two renderings need that the block walk would otherwise discard.
+type docxCellCtx struct {
+	span int
+	text []string
 }
 
 // takePending returns and clears the captions queued by the last paragraph.
@@ -164,7 +189,18 @@ func (dc *docxCtx) document(data []byte) ([]string, error) {
 			found = true
 		}
 	}
+	return dc.blocks(d)
+}
 
+// blocks consumes the children of the block container the caller has just
+// entered and returns the Markdown blocks they produce.
+//
+// Four different elements are that container — w:body, a content control's
+// w:sdtContent, a text box's w:txbxContent and a table cell's w:tc — and all
+// four hold the same grammar. Walking them through one function is what makes a
+// list inside a text box inside a table cell come out as a list: a simplified
+// second path for "the nested case" is exactly how that content gets lost.
+func (dc *docxCtx) blocks(d *xml.Decoder) ([]string, error) {
 	var (
 		blocks      []string
 		list        []string
@@ -200,6 +236,11 @@ func (dc *docxCtx) document(data []byte) ([]string, error) {
 				if err != nil {
 					return nil, fmt.Errorf("docx: %w", err)
 				}
+				if dc.cell != nil {
+					if s := mdutil.Collapse(plainDocxSegs(p.segs)); s != "" {
+						dc.cell.text = append(dc.cell.text, s)
+					}
+				}
 				if p.list {
 					list = append(list, dc.listItem(p, &counters))
 					listCaption = append(listCaption, dc.takePending()...)
@@ -211,16 +252,47 @@ func (dc *docxCtx) document(data []byte) ([]string, error) {
 				}
 				blocks = append(blocks, dc.takePending()...)
 			case "tbl":
-				rows, err := dc.table(d)
+				tbl, err := dc.table(d)
 				if err != nil {
 					return nil, fmt.Errorf("docx: %w", err)
 				}
 				flushList()
-				if len(rows) > 0 {
-					if tbl := mdutil.Table(rows[0], rows[1:]); tbl != "" {
-						blocks = append(blocks, tbl)
+				blocks = append(blocks, tbl...)
+				blocks = append(blocks, dc.takePending()...)
+			case "tcPr":
+				// A cell's properties sit among its blocks. w:gridSpan is the
+				// only one that changes the rendering, and it has to be read
+				// here because this loop owns the cell's children.
+				if err := dc.cellProps(d); err != nil {
+					if err == io.EOF {
+						depth = 0
+						continue
 					}
+					return nil, fmt.Errorf("docx: %w", err)
 				}
+			case "sdt", "sdtContent", "AlternateContent", "Choice":
+				// Transparent wrappers. A content control (w:sdt) is a *box
+				// around* real body content — a cover title, a locked table —
+				// so skipping it drops everything inside; and mc:Choice is the
+				// modern half of a Word shape, which is the half we read.
+				depth++
+			case "Fallback":
+				// The legacy VML twin of the mc:Choice above, carrying the same
+				// text. Taking both emits every text box twice.
+				if err := ooxml.SkipElement(d); err != nil {
+					if err == io.EOF {
+						depth = 0
+						continue
+					}
+					return nil, fmt.Errorf("docx: %w", err)
+				}
+			case "txbxContent":
+				inner, err := dc.textbox(d)
+				if err != nil {
+					return nil, fmt.Errorf("docx: %w", err)
+				}
+				flushList()
+				blocks = append(blocks, inner...)
 			default:
 				if err := ooxml.SkipElement(d); err != nil {
 					if err == io.EOF {
@@ -236,6 +308,59 @@ func (dc *docxCtx) document(data []byte) ([]string, error) {
 	}
 	flushList()
 	return blocks, nil
+}
+
+// textbox renders one w:txbxContent — the body of a Word text box, reached
+// either through a DrawingML shape (wps:txbx) or the legacy VML path
+// (w:pict/v:shape/v:textbox). Its content is ordinary paragraphs, so it goes
+// through the same block walk as the body and keeps its lists, headings and
+// tables.
+//
+// The blocks come back to the caller rather than being spliced inline: a text
+// box is anchored *in* a paragraph but reads as its own prose, and putting a
+// list inside a paragraph would not be Markdown.
+func (dc *docxCtx) textbox(d *xml.Decoder) ([]string, error) {
+	if dc.tbDepth >= docxMaxTextboxDepth {
+		err := ooxml.SkipElement(d)
+		if err == io.EOF {
+			err = nil
+		}
+		return nil, err
+	}
+	dc.tbDepth++
+	savedPending := dc.pending
+	dc.pending = nil
+	blocks, err := dc.blocks(d)
+	dc.pending = savedPending
+	dc.tbDepth--
+	return blocks, err
+}
+
+// cellProps consumes a w:tcPr, recording the horizontal span on the cell being
+// walked. Outside a cell it is an ordinary skip.
+func (dc *docxCtx) cellProps(d *xml.Decoder) error {
+	depth := 1
+	for depth > 0 {
+		tok, err := d.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "gridSpan" && dc.cell != nil {
+				if n, err := strconv.Atoi(strings.TrimSpace(ooxml.Attr(t, "val"))); err == nil && n > 1 && n <= 1000 {
+					dc.cell.span = n
+				}
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	return nil
 }
 
 // block renders a non-list paragraph: a heading when its style says so,
@@ -323,13 +448,25 @@ func (dc *docxCtx) paragraph(d *xml.Decoder) (docxPara, error) {
 				}
 				p.segs = append(p.segs, seg)
 			case "drawing":
-				alt, embed, err := docxDrawing(d)
+				alt, embed, err := dc.drawing(d)
 				if err != nil {
 					return p, err
 				}
 				if seg, ok := dc.image(alt, embed); ok {
 					p.segs = append(p.segs, seg)
 				}
+			case "Fallback":
+				// See blocks(): the VML twin of a shape already read from
+				// mc:Choice, whose text would otherwise be emitted twice.
+				if err := ooxml.SkipElement(d); err != nil && err != io.EOF {
+					return p, err
+				}
+			case "txbxContent":
+				inner, err := dc.textbox(d)
+				if err != nil {
+					return p, err
+				}
+				dc.pending = append(dc.pending, inner...)
 			default:
 				// Descend. Revision marks (w:ins), structured document tags and
 				// smart tags all wrap runs we still want, and descending costs
@@ -442,13 +579,32 @@ func (dc *docxCtx) run(d *xml.Decoder) ([]docxSeg, error) {
 				}
 				sb.WriteString(" ")
 			case "drawing":
-				alt, embed, err := docxDrawing(d)
+				alt, embed, err := dc.drawing(d)
 				if err != nil {
 					return nil, err
 				}
 				if seg, ok := dc.image(alt, embed); ok {
 					flush()
 					out = append(out, seg)
+				}
+			case "AlternateContent", "Choice", "pict", "object",
+				"group", "shape", "shapetype", "rect", "roundrect",
+				"oval", "line", "polyline", "textbox":
+				// A run's default is to *skip* what it does not know, because
+				// most of what a run holds is metadata. These are the
+				// exception: they are the containers a Word shape is built
+				// from, and a text box's paragraphs sit at the bottom of them.
+				// This is the whole reason textbox.docx converted to two lines.
+				depth++
+			case "txbxContent":
+				inner, err := dc.textbox(d)
+				if err != nil {
+					return nil, err
+				}
+				dc.pending = append(dc.pending, inner...)
+			case "Fallback":
+				if err := ooxml.SkipElement(d); err != nil && err != io.EOF {
+					return nil, err
 				}
 			case "delText":
 				// Deleted text from a tracked change is not part of the document.
@@ -552,9 +708,25 @@ func (dc *docxCtx) hyperlink(d *xml.Decoder, se xml.StartElement) (docxSeg, erro
 	return docxSeg{raw: "[" + text + "](" + escapeLinkURL(url) + ")"}, nil
 }
 
-// table consumes one w:tbl and returns its cells as a rectangular grid.
-func (dc *docxCtx) table(d *xml.Decoder) ([][]string, error) {
-	var rows [][]string
+// docxCell is one w:tc in both of the renderings a table might need: the flat
+// text a GFM cell can hold, and the full block rendering used when the table
+// turns out to be a layout wrapper rather than tabular data.
+type docxCell struct {
+	text   string
+	blocks []string
+	span   int
+}
+
+// table consumes one w:tbl and returns the blocks it renders to.
+//
+// It returns blocks rather than a grid because not every w:tbl is a table. Word
+// has no "box" primitive, so authors draw one as a table with a single row and
+// a single cell wrapped around ordinary body content — a list, a nested table,
+// a run of paragraphs. Rendering that as a one-cell GFM table flattens whatever
+// was inside it into one line and loses a nested table entirely, so a
+// single-cell table is unwrapped and its content emitted at this level.
+func (dc *docxCtx) table(d *xml.Decoder) ([]string, error) {
+	var rows [][]docxCell
 	depth := 1
 	for depth > 0 {
 		tok, err := d.Token()
@@ -585,13 +757,35 @@ func (dc *docxCtx) table(d *xml.Decoder) ([][]string, error) {
 			depth--
 		}
 	}
-	return padRectangular(rows), nil
+
+	if len(rows) == 1 && len(rows[0]) == 1 {
+		return rows[0][0].blocks, nil
+	}
+
+	grid := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		cells := make([]string, 0, len(row))
+		for _, c := range row {
+			cells = append(cells, c.text)
+			for i := 1; i < c.span; i++ {
+				cells = append(cells, "")
+			}
+		}
+		grid = append(grid, cells)
+	}
+	grid = padRectangular(grid)
+	if len(grid) == 0 {
+		return nil, nil
+	}
+	if tbl := mdutil.Table(grid[0], grid[1:]); tbl != "" {
+		return []string{tbl}, nil
+	}
+	return nil, nil
 }
 
-// tableRow consumes one w:tr, expanding w:gridSpan into padding cells so the
-// row keeps the grid's real column count.
-func (dc *docxCtx) tableRow(d *xml.Decoder) ([]string, error) {
-	row := []string{}
+// tableRow consumes one w:tr and returns its cells.
+func (dc *docxCtx) tableRow(d *xml.Decoder) ([]docxCell, error) {
+	row := []docxCell{}
 	depth := 1
 	for depth > 0 {
 		tok, err := d.Token()
@@ -604,14 +798,11 @@ func (dc *docxCtx) tableRow(d *xml.Decoder) ([]string, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if t.Name.Local == "tc" {
-				text, span, err := dc.tableCell(d)
+				cell, err := dc.tableCell(d)
 				if err != nil {
 					return nil, err
 				}
-				row = append(row, text)
-				for i := 1; i < span; i++ {
-					row = append(row, "")
-				}
+				row = append(row, cell)
 				continue
 			}
 			if err := ooxml.SkipElement(d); err != nil {
@@ -628,60 +819,30 @@ func (dc *docxCtx) tableRow(d *xml.Decoder) ([]string, error) {
 	return row, nil
 }
 
-// tableCell consumes one w:tc, returning its collapsed paragraph text and its
-// horizontal span.
-func (dc *docxCtx) tableCell(d *xml.Decoder) (string, int, error) {
+// tableCell consumes one w:tc through the ordinary block walk, so a cell keeps
+// its lists, its content controls and its nested tables, and hands back both
+// renderings of what it found.
+func (dc *docxCtx) tableCell(d *xml.Decoder) (docxCell, error) {
 	// Captions cannot live in a GFM cell, so no image inside a table is sent
 	// to the model at all. Restored on the way out because tables nest.
 	wasInTable := dc.inTable
 	dc.inTable = true
-	defer func() { dc.inTable = wasInTable }()
+	parent := dc.cell
+	cur := &docxCellCtx{span: 1}
+	dc.cell = cur
+	defer func() { dc.inTable = wasInTable; dc.cell = parent }()
 
-	span := 1
-	var paras []string
-	depth := 1
-	for depth > 0 {
-		tok, err := d.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", span, err
-		}
-		switch t := tok.(type) {
-		case xml.StartElement:
-			switch t.Name.Local {
-			case "gridSpan":
-				if n, err := strconv.Atoi(strings.TrimSpace(ooxml.Attr(t, "val"))); err == nil && n > 1 && n <= 1000 {
-					span = n
-				}
-				depth++
-			case "p":
-				p, err := dc.paragraph(d)
-				if err != nil {
-					return "", span, err
-				}
-				if s := mdutil.Collapse(plainDocxSegs(p.segs)); s != "" {
-					paras = append(paras, s)
-				}
-			case "tbl":
-				// A nested table cannot be rendered inside a GFM cell; drop it
-				// rather than emit a table that is no longer rectangular.
-				if err := ooxml.SkipElement(d); err != nil {
-					if err == io.EOF {
-						depth = 0
-						continue
-					}
-					return "", span, err
-				}
-			default:
-				depth++
-			}
-		case xml.EndElement:
-			depth--
-		}
+	blocks, err := dc.blocks(d)
+	// A nested table's text belongs to the cell that contains it as well as to
+	// its own cells, or it would vanish from the outer row.
+	if parent != nil {
+		parent.text = append(parent.text, cur.text...)
 	}
-	return mdutil.Collapse(strings.Join(paras, " ")), span, nil
+	return docxCell{
+		text:   mdutil.Collapse(strings.Join(cur.text, " ")),
+		blocks: blocks,
+		span:   cur.span,
+	}, err
 }
 
 // padRectangular widens every row to the widest one, so mdutil.Table never
@@ -878,10 +1039,17 @@ func docxCoreTitle(data []byte) string {
 	return strings.TrimSpace(props.Title)
 }
 
-// docxDrawing consumes a w:drawing and returns the normalized alt text of its
+// drawing consumes a w:drawing and returns the normalized alt text of its
 // wp:docPr (falling back to the shape name) plus the r:embed relationship id of
 // the first a:blip, which is what names the media part holding the pixels.
-func docxDrawing(d *xml.Decoder) (alt, embed string, err error) {
+//
+// A w:drawing is not only ever a picture. It is also how Word anchors a shape
+// with a text box in it and how it anchors a chart, and both of those carry
+// content that no alt text describes. Those are queued as blocks, and a drawing
+// that turned out to be one of them reports no image at all: "![Chart 5]()"
+// next to the chart's own numbers is noise, not a figure.
+func (dc *docxCtx) drawing(d *xml.Decoder) (alt, embed string, err error) {
+	var extra []string
 	depth := 1
 	for depth > 0 {
 		tok, err := d.Token()
@@ -894,8 +1062,17 @@ func docxDrawing(d *xml.Decoder) (alt, embed string, err error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			switch {
+			case t.Name.Local == "txbxContent":
+				inner, err := dc.textbox(d)
+				if err != nil {
+					return "", "", err
+				}
+				extra = append(extra, inner...)
+				continue
 			case t.Name.Local == "docPr" && alt == "":
-				alt = ooxmlAltText(ooxml.Attr(t, "descr"), ooxml.Attr(t, "name"))
+				alt = ooxmlAltText(ooxml.Attr(t, "descr"), docxShapeName(ooxml.Attr(t, "name")))
+			case t.Name.Local == "chart":
+				extra = append(extra, dc.chart(ooxml.Attr(t, "id"))...)
 			case t.Name.Local == "blip" && embed == "":
 				// r:embed is the internal part; r:link points outside the
 				// package and is deliberately ignored.
@@ -915,7 +1092,115 @@ func docxDrawing(d *xml.Decoder) (alt, embed string, err error) {
 			depth--
 		}
 	}
+	dc.pending = append(dc.pending, extra...)
+	if len(extra) > 0 && embed == "" {
+		return "", "", nil
+	}
 	return alt, embed, nil
+}
+
+// docxShapeName drops the identifier Word generates for every shape it creates
+// — "Picture 1", "Group 4", "Text Box 3", "Elbow Connector 12" — and keeps a
+// name someone actually chose.
+//
+// wp:docPr@name is a fallback for wp:docPr@descr, and a fallback is only worth
+// having when it says something. An auto-generated name describes nothing, and
+// putting it in an image's alt text invents words the document never contained:
+// it reads as content to anything downstream that indexes the Markdown. The
+// tell is that Word always suffixes the shape's ordinal, which an authored
+// caption almost never ends with.
+func docxShapeName(name string) string {
+	trimmed := strings.TrimRight(name, "0123456789")
+	if trimmed == name || strings.TrimSpace(trimmed) == "" {
+		return name
+	}
+	if rest := strings.TrimRight(trimmed, " \t"); rest != trimmed {
+		return ""
+	}
+	return name
+}
+
+// chart follows a c:chart relationship into word/charts/chartN.xml and renders
+// what a reader would actually see: the chart's label, and the category x
+// series grid from the cached values the producer embedded beside the plot.
+//
+// The cache is the only readable source — the live data lives in an embedded
+// workbook — so an uncached chart degrades to its label alone rather than
+// failing the document.
+func (dc *docxCtx) chart(relID string) []string {
+	if relID == "" || dc.pkg == nil || dc.rels == nil {
+		return nil
+	}
+	part := ooxml.ResolveTarget(docxDocumentPart, dc.rels[relID])
+	if part == "" || !dc.pkg.Has(part) {
+		return nil
+	}
+	data := dc.pkg.OptionalPart(part)
+	if len(data) == 0 {
+		return nil
+	}
+	ch, err := ooxml.ParseChart(data)
+	if err != nil {
+		return nil
+	}
+
+	var blocks []string
+	if label := docxChartLabel(ch); label != "" {
+		blocks = append(blocks, label)
+	}
+	if len(ch.Series) == 0 {
+		return blocks
+	}
+	// The first column holds the categories, which belong to the chart rather
+	// than to any one series, so its header is empty.
+	header := []string{""}
+	rowCount := 0
+	for _, s := range ch.Series {
+		header = append(header, s.Name)
+		if len(s.Cats) > rowCount {
+			rowCount = len(s.Cats)
+		}
+		if len(s.Vals) > rowCount {
+			rowCount = len(s.Vals)
+		}
+	}
+	if rowCount == 0 {
+		return blocks
+	}
+	rows := make([][]string, 0, rowCount)
+	for i := 0; i < rowCount; i++ {
+		row := []string{""}
+		for _, s := range ch.Series {
+			if row[0] == "" && i < len(s.Cats) {
+				row[0] = s.Cats[i]
+			}
+			v := ""
+			if i < len(s.Vals) {
+				v = s.Vals[i]
+			}
+			row = append(row, v)
+		}
+		rows = append(rows, row)
+	}
+	if t := mdutil.Table(header, rows); t != "" {
+		blocks = append(blocks, t)
+	}
+	return blocks
+}
+
+// docxChartLabel names a chart: its authored title when it has one, and
+// otherwise the plot type, which is the only other thing the part says about
+// it ("Line chart"). An untitled chart with no label at all would leave the
+// table below it unexplained.
+func docxChartLabel(ch ooxml.Chart) string {
+	if ch.Title != "" {
+		return ch.Title
+	}
+	kind := strings.TrimSuffix(ch.Kind, "3D")
+	if kind == "" {
+		return ""
+	}
+	return strings.ToUpper(kind[:1]) + kind[1:] + " chart"
 }
 
 // ooxmlAltText normalizes an authored image description into something safe to
