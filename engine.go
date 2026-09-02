@@ -124,7 +124,7 @@ func (e *Engine) ConvertStream(r io.Reader, info StreamInfo, opts *Options) (Res
 		opts = &Options{}
 	}
 	o := *opts
-	return e.convert(rs, info, &o)
+	return cachedConvert(e, rs, info, &o)
 }
 
 // ConvertBytes converts an in-memory document.

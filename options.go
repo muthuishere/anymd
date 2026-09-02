@@ -24,6 +24,13 @@ type Options struct {
 	// Charset overrides the detected encoding for text-ish formats.
 	Charset string
 
+	// Cache, when non-nil, serves and stores conversions content-addressed.
+	// Nil (the default) disables caching entirely: a library must not write to
+	// a caller's disk unasked, and a one-shot conversion pays the hash for
+	// nothing. See CacheKey for what the key covers — notably the anymd
+	// version, so an upgrade invalidates rather than serving stale output.
+	Cache Cache
+
 	// Describer, when non-nil, is used to caption images and to read pages that
 	// have no text layer. Nil (the default) means anymd makes NO network calls
 	// during conversion — see the Describer docs.

@@ -68,6 +68,7 @@ func main() {
 
 // config is the parsed command line.
 type config struct {
+	cache     cacheOptions
 	out       string
 	outdir    string
 	ext       string
@@ -106,6 +107,7 @@ type config struct {
 func newFlagSet(cfg *config, stderr io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet("anymd", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	registerCacheFlags(fs, &cfg.cache)
 
 	strVar := func(p *string, def string, names ...string) {
 		for _, n := range names {
@@ -203,6 +205,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "config" {
 		return runConfig(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "cache" {
+		return runCacheCommand(args[1:], stdout, stderr)
+	}
 
 	cfg := &config{}
 	fs := newFlagSet(cfg, stderr)
@@ -244,6 +249,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if code := applyLLM(cfg, opts, stderr); code != exitOK {
+		return code
+	}
+
+	var code int
+	if opts.Cache, code = resolveCache(&cfg.cache, cfg.setFlags, stderr); code != exitOK {
 		return code
 	}
 
