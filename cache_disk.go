@@ -207,9 +207,6 @@ func (c *DiskCache) load(key string) (diskEntry, bool) {
 	if !ok {
 		return diskEntry{}, false
 	}
-	// #nosec G703 -- p comes from c.path, which accepts only a hex-only key of
-	// at least 8 chars and joins it under c.dir. No caller-controlled separator
-	// or ".." can survive hexOnly, so the join cannot escape the cache dir.
 	raw, err := os.ReadFile(p)
 	if err != nil {
 		return diskEntry{}, false
@@ -234,8 +231,6 @@ func (c *DiskCache) load(key string) (diskEntry, bool) {
 
 // discard removes an unusable entry, best effort and never fatal.
 func (c *DiskCache) discard(p string) {
-	// #nosec G703 -- contains() re-checks that p is under c.dir before removal,
-	// which is the whole point of this guard.
 	if filepath.Ext(p) == entrySuffix && c.contains(p) {
 		_ = os.Remove(p)
 	}

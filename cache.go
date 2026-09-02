@@ -235,13 +235,16 @@ func cacheKeyWith(version string, content []byte, converter string, info StreamI
 	if o.MaxDepth >= 0 {
 		remaining = o.maxDepth() - o.depth
 	}
-	// Clamp before the cast: a negative remaining budget (depth past maxDepth)
-	// would wrap to a huge uint64 and give two different states the same key.
-	if remaining < 0 {
-		remaining = 0
+	// Encode remaining+1 so the whole range is non-negative and the cast cannot
+	// wrap. -1 is a SENTINEL ("recursion disabled"), not a small budget, so it
+	// must stay distinct from 0 ("no levels left") — clamping the two together
+	// would give two different states the same key. A budget past its depth is
+	// floored at the sentinel's neighbour rather than folded onto it.
+	if remaining < -1 {
+		remaining = -1
 	}
 	var num [8]byte
-	binary.BigEndian.PutUint64(num[:], uint64(remaining))
+	binary.BigEndian.PutUint64(num[:], uint64(remaining+1))
 	field(h, 'd', num[:])
 	field(h, 'o', []byte{boolByte(o.KeepDataURIs), boolByte(o.Describer != nil), boolByte(o.Transcriber != nil)})
 	field(h, 'C', []byte(o.Charset))
