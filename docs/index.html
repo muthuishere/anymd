@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>anymd — any document to Markdown, in pure Go</title>
-<meta name="description" content="A pure-Go library and CLI that converts PDF, Word, Excel, PowerPoint, EPUB and more to Markdown. No cgo, no Python, no native library.">
+<meta name="description" content="A pure-Go library and CLI that converts PDF, Word, Excel, PowerPoint, EPUB and more to Markdown. No cgo, no Python, no native library. Optional LLM image captioning and audio transcription.">
 <style>
 :root{
   --bg:#fbfbfa; --fg:#1a1a19; --muted:#5c5c58; --line:#e3e3df;
@@ -79,7 +79,8 @@ go get github.com/muthuishere/anymd</code></pre>
 <pre><code>$ anymd report.docx &gt; report.md
 $ anymd *.pdf --outdir ./md
 $ cat data.xlsx | anymd -t xlsx
-$ anymd https://example.com/post.html</code></pre>
+$ anymd https://example.com/post.html
+$ anymd --llm scan.pdf              # opt in: caption images, read a scan</code></pre>
 
 <pre><code>md, err := anymd.ConvertFile("report.docx")
 if err != nil {
@@ -94,7 +95,7 @@ fmt.Println(md.Markdown)</code></pre>
   <div class="card"><h3>Library first</h3>
     <p>The CLI is a thin wrapper. Embed the converter in your own service without shelling out.</p></div>
   <div class="card"><h3>Built for hostile input</h3>
-    <p>Fuzzed per format. Bounded allocations, zip-bomb caps, no network at convert time.</p></div>
+    <p>Fuzzed per format. Bounded allocations, zip-bomb caps, and no network at convert time unless you ask for it.</p></div>
   <div class="card"><h3>Honest failures</h3>
     <p>A scanned PDF returns <code>ErrNoTextLayer</code>, never a silent empty string.</p></div>
 </div>
@@ -115,22 +116,45 @@ fmt.Println(md.Markdown)</code></pre>
 <tr><td>Feeds</td><td>RSS and Atom, per-entry</td></tr>
 <tr><td>Notebooks</td><td>markdown + code cells, text outputs</td></tr>
 <tr><td>Data</td><td>CSV, TSV, JSON, plain text</td></tr>
-<tr><td>Images</td><td>dimensions and EXIF (camera, exposure, GPS)</td></tr>
+<tr><td>Images</td><td>dimensions and EXIF (camera, exposure, GPS) — plus a caption with <code>--llm</code></td></tr>
+<tr><td>Audio</td><td>transcript, with <code>--llm-transcribe</code> only</td></tr>
 </tbody>
 </table>
 </div>
 
-<h2>What it deliberately does not do</h2>
-<p class="note">No OCR. No audio transcription. No LLM captioning. No network access during
-conversion. Each needs a model or a fetch, and shipping either would cost the single-binary
-promise that is the reason to choose this library. A scanned PDF returns a named error so
-you can route it to an OCR service yourself.</p>
+<h2>Optional: LLM features</h2>
+<p>By default there is no OCR, no captioning, no transcription, and <strong>no network
+access at all during conversion</strong>. That is the default on purpose — it is what makes
+it safe to point at a document someone emailed you. One flag opts in:</p>
+
+<pre><code>$ anymd --llm deck.pptx                      # caption every figure
+$ anymd --llm scan.pdf                       # read a page with no text layer
+$ anymd --llm --llm-transcribe interview.m4a # transcribe audio</code></pre>
+
+<p>Captioning is <strong>one model call per distinct image</strong> (a logo repeated on
+every slide is captioned once); transcription is one call per file. Configure it in
+<code>~/.config/anymd/anymdconfig.json</code>, where every field supports
+<code>${VAR}</code> interpolation so the key stays in your environment:</p>
+
+<pre><code>$ anymd config init   # starter config, mode 0600, never overwrites
+$ anymd config show   # resolved config — api_key: &lt;set from ${OPENROUTER_API_KEY}&gt;
+$ anymd config path</code></pre>
+
+<p class="note">anymd never prints an API key — not in an error, not in
+<code>config show</code>, not masked. Precedence is explicit flag &gt; config file &gt;
+environment &gt; default. Point <code>--llm-base-url</code> at a local Ollama or vLLM and
+nothing leaves the box at all.</p>
+
+<h2>What it still does not do</h2>
+<p class="note">No pixel-faithful rendering or layout geometry. No writing documents —
+it is one-directional. And nothing at all over the network unless you passed
+<code>--llm</code>: a document can never make anymd phone home on its own.</p>
 
 <h2>Verified against markitdown's own corpus</h2>
 <p>Checked against the 31 test files in Microsoft markitdown's test suite, not only
-fixtures we wrote ourselves. <strong>26 of 31 convert.</strong> The other five are the
-scope decisions above — one scanned PDF, three audio files, one random binary that is
-correctly refused rather than emitted as garbage.</p>
+fixtures we wrote ourselves. <strong>26 of 31 convert</strong> in the default offline build. Of the other five, the
+scanned PDF and the three audio files convert once <code>--llm</code> is on; the
+remaining one is a random binary, correctly refused rather than emitted as garbage.</p>
 
 <footer>
   MIT licensed · <a href="https://github.com/muthuishere/anymd">Source on GitHub</a> ·

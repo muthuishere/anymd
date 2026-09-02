@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,14 +24,17 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/muthuishere/anymd"
+	"github.com/muthuishere/anymd/llm"
 )
 
 // Build stamps. The Makefile sets these with -ldflags -X main.version=...
@@ -78,7 +82,25 @@ type config struct {
 	insecure  bool
 	list      bool
 	showVer   bool
-	args      []string
+
+	// LLM options. Everything here is off unless --llm is given: without it
+	// anymd makes no network calls during conversion at all, which is the
+	// guarantee that lets you point it at untrusted input.
+	llm           bool
+	llmConfig     string
+	llmModel      string
+	llmBaseURL    string
+	llmTimeout    time.Duration
+	llmTranscribe bool
+	llmTransModel string
+
+	// setFlags records which flags actually appeared on the command line, so
+	// precedence (explicit flag > config file > environment > default) can be
+	// applied and so an LLM flag without --llm is a usage error rather than a
+	// silently ignored one.
+	setFlags map[string]bool
+
+	args []string
 }
 
 func newFlagSet(cfg *config, stderr io.Writer) *flag.FlagSet {
@@ -111,6 +133,14 @@ func newFlagSet(cfg *config, stderr io.Writer) *flag.FlagSet {
 	boolVar(&cfg.list, "list")
 	boolVar(&cfg.showVer, "version")
 
+	boolVar(&cfg.llm, "llm")
+	strVar(&cfg.llmConfig, "", "llm-config")
+	strVar(&cfg.llmModel, "", "llm-model")
+	strVar(&cfg.llmBaseURL, "", "llm-base-url")
+	fs.DurationVar(&cfg.llmTimeout, "llm-timeout", 0, "")
+	boolVar(&cfg.llmTranscribe, "llm-transcribe")
+	strVar(&cfg.llmTransModel, "", "llm-transcribe-model")
+
 	fs.Usage = func() { fmt.Fprint(stderr, usage) }
 	return fs
 }
@@ -118,6 +148,7 @@ func newFlagSet(cfg *config, stderr io.Writer) *flag.FlagSet {
 const usage = `anymd — convert any document to Markdown (pure Go, no cgo)
 
 usage: anymd [flags] [file|url ...]
+       anymd config <path|show|init> [--llm-config FILE]
 
   With no arguments (or "-") anymd reads stdin and writes Markdown to stdout.
   With a single input and no -o/-d it writes to stdout. Progress, warnings and
@@ -140,11 +171,39 @@ flags:
       --list         print the registered converters in dispatch order
       --version      print version, commit and Go version
 
+llm flags (all off by default — WITHOUT --llm anymd makes no network calls
+during conversion at all, which is what makes it safe on untrusted input):
+      --llm          enable LLM image captioning (one model call per image)
+      --llm-config F config file; default ~/.config/anymd/anymdconfig.json
+      --llm-model M  override the model from the config file
+      --llm-base-url U  override the endpoint (a local Ollama or vLLM works)
+      --llm-timeout D   bound one model call, e.g. 30s (default 60s)
+      --llm-transcribe  also transcribe audio (one call per file, costs money)
+      --llm-transcribe-model M  speech model (default whisper-1); this is a
+                     different endpoint from --llm-model, hence its own flag
+
+  Precedence: explicit flag > config file > environment > default.
+  The API key is read from the environment (OPENROUTER_API_KEY, OPENAI_API_KEY
+  or ANTHROPIC_API_KEY), or from the config file via ${VAR} interpolation.
+  anymd never prints a key, not even masked.
+
+config subcommand:
+  anymd config path   print the config file path
+  anymd config show   print the resolved config with every secret redacted
+  anymd config init   write a starter config (mode 0600), never overwriting
+
 exit codes: 0 all converted · 1 one or more failed · 2 usage error
 `
 
 // run is the whole program; main is a wrapper so tests can drive it directly.
 func run(args []string, stdout, stderr io.Writer) int {
+	// "config" is a subcommand, not an input file. It is checked before flag
+	// parsing because Go's flag package stops at the first positional argument
+	// anyway, so `anymd config show` would never reach the parser as flags.
+	if len(args) > 0 && args[0] == "config" {
+		return runConfig(args[1:], stdout, stderr)
+	}
+
 	cfg := &config{}
 	fs := newFlagSet(cfg, stderr)
 	if err := fs.Parse(args); err != nil {
@@ -154,6 +213,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	cfg.args = fs.Args()
+	cfg.setFlags = make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { cfg.setFlags[f.Name] = true })
 
 	if cfg.showVer {
 		fmt.Fprintf(stdout, "anymd %s\ncommit: %s\ngo: %s\n", version, resolveCommit(), runtime.Version())
@@ -180,6 +241,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		MaxDepth:     cfg.maxDepth,
 		KeepDataURIs: cfg.keepURIs,
 		Charset:      cfg.charset,
+	}
+
+	if code := applyLLM(cfg, opts, stderr); code != exitOK {
+		return code
 	}
 
 	// stdin mode: no inputs at all, or the single conventional "-".
@@ -621,4 +686,390 @@ func fetch(rawurl string, insecure bool) ([]byte, anymd.StreamInfo, error) {
 		}
 	}
 	return buf.Bytes(), info, nil
+}
+
+// ---------------------------------------------------------------------------
+// LLM wiring
+//
+// Everything below is inert unless --llm is given. That is the point: the
+// default build converts documents without a single outbound packet, and
+// turning that off has to be an explicit, visible act.
+// ---------------------------------------------------------------------------
+
+// llmFlagNames are the flags that only mean something with --llm.
+var llmFlagNames = []string{"llm-config", "llm-model", "llm-base-url", "llm-timeout", "llm-transcribe", "llm-transcribe-model"}
+
+// keyEnvVars are the environment variables a key is read from, in the order
+// toolnexus consults them. Named here so an error message can name them; the
+// VALUES are never read into a message, printed, or logged.
+var keyEnvVars = []string{"OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
+
+// applyLLM resolves the LLM configuration and attaches a Describer (and, once
+// it exists, a Transcriber) to opts.
+//
+// Precedence is explicit flag > config file > environment > default. The config
+// file's ${VAR} interpolation is what pulls the environment in, so the file is
+// the layer that decides WHICH environment variable matters; a flag overrides
+// whatever it resolved to.
+func applyLLM(cfg *config, opts *anymd.Options, stderr io.Writer) int {
+	if !cfg.llm {
+		// Silently ignoring a flag the user typed is how an afternoon gets
+		// lost — especially --llm-model, whose absence looks like the model
+		// simply performing badly.
+		for _, n := range llmFlagNames {
+			if cfg.setFlags[n] {
+				fmt.Fprintf(stderr, "anymd: --%s requires --llm\n", n)
+				return exitUsage
+			}
+		}
+		return exitOK
+	}
+
+	lc, err := llm.Load(cfg.llmConfig)
+	if err != nil {
+		// llm.Load's errors name the field and the environment VARIABLE, never
+		// a value, so this is safe to print verbatim.
+		fmt.Fprintf(stderr, "anymd: %v\n", err)
+		return exitUsage
+	}
+
+	// Flags override the file.
+	if cfg.setFlags["llm-model"] {
+		lc.Model = cfg.llmModel
+	}
+	if cfg.setFlags["llm-base-url"] {
+		lc.BaseURL = cfg.llmBaseURL
+	}
+	if cfg.setFlags["llm-timeout"] {
+		if cfg.llmTimeout <= 0 {
+			fmt.Fprintln(stderr, "anymd: --llm-timeout must be positive, e.g. 30s")
+			return exitUsage
+		}
+		lc.TimeoutMs = int(cfg.llmTimeout / time.Millisecond)
+		opts.LLMTimeout = cfg.llmTimeout
+	} else if lc.TimeoutMs > 0 {
+		opts.LLMTimeout = time.Duration(lc.TimeoutMs) * time.Millisecond
+	}
+
+	if !hasAPIKey(lc.APIKey) {
+		fmt.Fprintf(stderr, "anymd: --llm needs an API key: set %s in the environment "+
+			"(or %s / %s), or add \"api_key\": \"${%s}\" to %s\n",
+			keyEnvVars[0], keyEnvVars[1], keyEnvVars[2], keyEnvVars[0], configPathOr(cfg.llmConfig))
+		return exitUsage
+	}
+
+	opts.Describer = llm.New(lc)
+
+	if cfg.llmTranscribe {
+		// Transcription is a separate opt-in because it is a separate endpoint
+		// (/audio/transcriptions, not chat completions), a separate model, and
+		// a separate per-file charge. Bundling it into --llm would bill people
+		// for audio they only meant to skip.
+		if !hasTranscribeKey(lc.APIKey) {
+			fmt.Fprintf(stderr, "anymd: --llm-transcribe needs an API key for the speech endpoint: "+
+				"set %s in the environment (or %s / %s)\n",
+				transcribeEnvVars[0], transcribeEnvVars[1], transcribeEnvVars[2])
+			return exitUsage
+		}
+		opts.Transcriber = llm.NewTranscriber(lc, cfg.llmTransModel)
+	} else if cfg.setFlags["llm-transcribe-model"] {
+		fmt.Fprintln(stderr, "anymd: --llm-transcribe-model requires --llm-transcribe")
+		return exitUsage
+	}
+
+	if !cfg.quiet {
+		fmt.Fprintf(stderr, "anymd: llm enabled (model %s) — one model call per image\n", modelName(lc.Model))
+		if cfg.llmTranscribe {
+			fmt.Fprintf(stderr, "anymd: audio transcription enabled (model %s) — one model call per file\n",
+				orDefault(cfg.llmTransModel, llm.DefaultTranscribeModel+" (default)"))
+		}
+	}
+	return exitOK
+}
+
+// transcribeEnvVars are the variables llm.NewTranscriber consults, in its
+// order. They differ from the captioning set: the speech endpoint is
+// OpenAI-shaped, so an Anthropic key is no use to it.
+var transcribeEnvVars = []string{"OPENAI_API_KEY", "OPENROUTER_API_KEY", "LLM_API_KEY"}
+
+// hasTranscribeKey reports whether the speech endpoint will authenticate,
+// without ever holding the value.
+func hasTranscribeKey(fromConfig string) bool {
+	if fromConfig != "" {
+		return true
+	}
+	for _, v := range transcribeEnvVars {
+		if os.Getenv(v) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAPIKey reports whether a key will resolve, WITHOUT ever holding onto,
+// returning, or printing the value.
+func hasAPIKey(fromConfig string) bool {
+	if fromConfig != "" {
+		return true
+	}
+	for _, v := range keyEnvVars {
+		if os.Getenv(v) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func modelName(m string) string {
+	if m == "" {
+		return llm.DefaultModel + " (default)"
+	}
+	return m
+}
+
+// configPathOr resolves the effective config path for a message.
+func configPathOr(override string) string {
+	if override != "" {
+		return override
+	}
+	p, err := llm.ConfigPath()
+	if err != nil {
+		return "the config file"
+	}
+	return p
+}
+
+// ---------------------------------------------------------------------------
+// `anymd config`
+// ---------------------------------------------------------------------------
+
+const configUsage = `anymd config — inspect and create the LLM config file
+
+usage: anymd config <command> [--llm-config FILE]
+
+  path   print the config file path
+  show   print the resolved config with every secret redacted
+  init   write a starter config to the path (mode 0600); never overwrites
+
+  --llm-config FILE   use FILE instead of ~/.config/anymd/anymdconfig.json
+`
+
+// starterConfig is what `config init` writes. JSON has no comments, so the
+// guidance rides in "_comment" keys, which the loader ignores.
+const starterConfig = `{
+  "_comment": "anymd LLM config. Every string field supports ${VAR} interpolation from the environment. NEVER put a literal API key in this file — reference an environment variable instead.",
+
+  "model": "openai/gpt-4o-mini",
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key": "${OPENROUTER_API_KEY}",
+
+  "_comment_optional": "Everything below is optional; delete what you do not need.",
+  "retries": 2,
+  "timeout_ms": 60000,
+  "anthropic": false
+}
+`
+
+// runConfig implements the `config` subcommand.
+func runConfig(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("anymd config", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var path string
+	fs.StringVar(&path, "llm-config", "", "")
+	fs.Usage = func() { fmt.Fprint(stderr, configUsage) }
+
+	// Accept the flag on either side of the verb: `config --llm-config F show`
+	// and `config show --llm-config F` both read naturally.
+	var verb string
+	rest := args
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		verb, rest = rest[0], rest[1:]
+	}
+	if err := fs.Parse(rest); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitUsage
+	}
+	if verb == "" {
+		if fs.NArg() > 0 {
+			verb = fs.Arg(0)
+		} else {
+			fmt.Fprint(stderr, configUsage)
+			return exitUsage
+		}
+	}
+
+	resolved := path
+	if resolved == "" {
+		p, err := llm.ConfigPath()
+		if err != nil {
+			fmt.Fprintf(stderr, "anymd: %v\n", err)
+			return exitFail
+		}
+		resolved = p
+	}
+
+	switch verb {
+	case "path":
+		fmt.Fprintln(stdout, resolved)
+		return exitOK
+	case "show":
+		return configShow(resolved, stdout, stderr)
+	case "init":
+		return configInit(resolved, stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "anymd: unknown config command %q\n\n", verb)
+		fmt.Fprint(stderr, configUsage)
+		return exitUsage
+	}
+}
+
+// configShow prints the config file with every secret redacted.
+//
+// It deliberately parses the RAW file rather than using llm.Load: Load
+// interpolates ${VAR}, and a resolved config holds the actual key. Reading the
+// raw form means the key's value is never loaded into a variable that could be
+// printed by a later careless edit — what we show is the ${VAR} reference the
+// author wrote, plus whether it currently resolves.
+func configShow(path string, stdout, stderr io.Writer) int {
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		fmt.Fprintf(stdout, "config file: %s (does not exist)\n", path)
+		fmt.Fprintf(stdout, "model:       %s\n", llm.DefaultModel+" (default)")
+		fmt.Fprintf(stdout, "base_url:    <provider default>\n")
+		fmt.Fprintf(stdout, "api_key:     %s\n", redactAPIKey(""))
+		fmt.Fprintf(stdout, "\nRun `anymd config init` to create it.\n")
+		return exitOK
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "anymd: %v\n", err)
+		return exitFail
+	}
+
+	var fc llm.FileConfig
+	if err := json.Unmarshal(raw, &fc); err != nil {
+		fmt.Fprintf(stderr, "anymd: parsing %s: %v\n", path, err)
+		return exitFail
+	}
+
+	fmt.Fprintf(stdout, "config file: %s\n", path)
+	fmt.Fprintf(stdout, "model:       %s\n", orDefault(fc.Model, llm.DefaultModel+" (default)"))
+	fmt.Fprintf(stdout, "base_url:    %s\n", orDefault(fc.BaseURL, "<provider default>"))
+	fmt.Fprintf(stdout, "api_key:     %s\n", redactAPIKey(fc.APIKey))
+	fmt.Fprintf(stdout, "anthropic:   %t\n", fc.Anthropic)
+	fmt.Fprintf(stdout, "retries:     %d\n", fc.Retries)
+	fmt.Fprintf(stdout, "timeout_ms:  %s\n", orDefault(itoaOrEmpty(fc.TimeoutMs), "60000 (default)"))
+	fmt.Fprintf(stdout, "prompt:      %s\n", orDefault(fc.Prompt, "<built-in>"))
+	fmt.Fprintf(stdout, "proxy:       %s\n", redactURL(fc.Proxy))
+	fmt.Fprintf(stdout, "insecure_skip_verify: %t\n", fc.InsecureSkipVerify)
+	if len(fc.Headers) > 0 {
+		names := make([]string, 0, len(fc.Headers))
+		for k := range fc.Headers {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		fmt.Fprintln(stdout, "headers:")
+		for _, k := range names {
+			// A header value is as likely to be a token as api_key is, so it
+			// gets exactly the same treatment.
+			fmt.Fprintf(stdout, "  %s: %s\n", k, redactAPIKey(fc.Headers[k]))
+		}
+	}
+	return exitOK
+}
+
+// envRefOnly matches a field whose entire value is a single ${VAR} reference.
+var envRefOnly = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+
+// redactAPIKey describes a secret field without ever emitting its value.
+//
+// There are exactly three shapes, and none of them prints the secret — not in
+// full, not truncated, not masked. A masked key still leaks its length and its
+// prefix, and it teaches people that showing part of a key is fine.
+func redactAPIKey(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		for _, name := range keyEnvVars {
+			if os.Getenv(name) != "" {
+				return fmt.Sprintf("<unset in config; will use $%s from the environment>", name)
+			}
+		}
+		return fmt.Sprintf("<unset — set $%s in the environment>", keyEnvVars[0])
+	}
+	if m := envRefOnly.FindStringSubmatch(v); m != nil {
+		if os.Getenv(m[1]) != "" {
+			return fmt.Sprintf("<set from ${%s}>", m[1])
+		}
+		return fmt.Sprintf("<references ${%s}, which is NOT set>", m[1])
+	}
+	return "<set literally in the file — move it to ${VAR} and keep it out of the file>"
+}
+
+// redactURL strips any embedded credentials from a URL before printing it.
+func redactURL(v string) string {
+	if v == "" {
+		return "<none>"
+	}
+	if envRefOnly.MatchString(v) {
+		return redactAPIKey(v)
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return "<unparseable>"
+	}
+	if u.User != nil {
+		u.User = url.User("<redacted>")
+	}
+	return u.String()
+}
+
+func orDefault(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
+}
+
+func itoaOrEmpty(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return strconv.Itoa(n)
+}
+
+// configInit writes a starter config, refusing to touch an existing one.
+//
+// O_EXCL rather than a Stat-then-Write: the check and the write are one atomic
+// operation, so there is no window in which a config someone else just created
+// gets clobbered. Mode 0600 because the file is where a key reference — and,
+// against advice, sometimes a key — lives.
+func configInit(path string, stdout, stderr io.Writer) int {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			fmt.Fprintf(stderr, "anymd: %v\n", err)
+			return exitFail
+		}
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			fmt.Fprintf(stderr, "anymd: %s already exists; refusing to overwrite it\n", path)
+			return exitFail
+		}
+		fmt.Fprintf(stderr, "anymd: %v\n", err)
+		return exitFail
+	}
+	if _, err := io.WriteString(f, starterConfig); err != nil {
+		f.Close()
+		fmt.Fprintf(stderr, "anymd: %v\n", err)
+		return exitFail
+	}
+	if err := f.Close(); err != nil {
+		fmt.Fprintf(stderr, "anymd: %v\n", err)
+		return exitFail
+	}
+	fmt.Fprintf(stdout, "wrote %s (mode 0600)\n", path)
+	fmt.Fprintf(stdout, "Set $%s in your environment, then: anymd --llm doc.pdf\n", keyEnvVars[0])
+	return exitOK
 }
