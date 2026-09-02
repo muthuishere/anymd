@@ -41,7 +41,12 @@ says why they are not the same promise.
 6. **Tests are mandatory** in `conv_<thing>_test.go`. Build fixtures **in Go**
    (write a real .docx/.zip with `archive/zip` at test time) rather than
    committing binaries. Assert exact markdown output, not "contains".
-7. `gofmt` clean. Doc comments on every exported symbol, explaining *why* where
+7. **Never assert POSIX file modes without a `runtime.GOOS != "windows"`
+   guard.** Windows has no permission bits — it uses ACLs, and Go reports 0666
+   for anything it creates, so `st.Mode().Perm() != 0o644` fails there and
+   nowhere else. This has cost two CI runs; the 3-OS matrix is the only thing
+   that catches it, and it will pass on your machine every time.
+8. `gofmt` clean. Doc comments on every exported symbol, explaining *why* where
    the code does not already say *what*.
 8. **Vendoring third-party code is a last resort, and it is a decision, not a
    commit.** It is right only when the change lives on an unexported path an

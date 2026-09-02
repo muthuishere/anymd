@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -108,14 +109,17 @@ func TestSkillsInstallCreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != skillFileMode {
+	// Windows has no POSIX permission bits — it uses ACLs, and Go reports 0666
+	// for any file it creates. The modes we pass are still correct and still
+	// honoured wherever modes exist; only the assertion is Unix-specific.
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != skillFileMode {
 		t.Fatalf("file mode = %v, want %v", fi.Mode().Perm(), skillFileMode)
 	}
 	di, err := os.Stat(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if di.Mode().Perm() != skillDirMode {
+	if runtime.GOOS != "windows" && di.Mode().Perm() != skillDirMode {
 		t.Fatalf("dir mode = %v, want %v", di.Mode().Perm(), skillDirMode)
 	}
 }
