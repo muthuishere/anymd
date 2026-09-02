@@ -180,7 +180,7 @@ reproducible script: [`bench/`](bench/).
 | 385K HTML (in-process) | **11.55 ms** | 104.15 ms |
 | CLI startup overhead | **none** | 309 ms per invocation |
 | Peak RSS (385K HTML) | **27 MB** | 160 MB |
-| Install footprint | **17 MB** binary | 318 MB venv |
+| Install footprint | **15 MB** binary | 318 MB venv |
 | Files with substantive output | 19/31 | 19/31 |
 
 One honest caveat: **the benchmark is the default, offline build**. With

@@ -124,6 +124,17 @@ type Options struct {
 	Include, Exclude []string
 	// Insecure skips TLS verification.
 	Insecure bool
+	// Sitemap selects how the site's sitemap.xml is used. The zero value,
+	// SitemapAuto, seeds the crawl from a sitemap when one is found AND still
+	// follows links, so a caller who never sets this field gets the better
+	// behaviour without asking for it. SitemapOnly suppresses link following;
+	// SitemapOff never looks for a sitemap at all. See SitemapMode.
+	//
+	// A sitemap is a HINT, never an authority. Every URL it lists goes through
+	// the same gates a link does — SameHost, Include/Exclude, robots.txt,
+	// MaxPages, normalisation and dedup — so a site cannot use its sitemap to
+	// make us fetch another host or a path its own robots.txt forbids.
+	Sitemap SitemapMode
 }
 
 // Ptr returns a pointer to v. It exists so an Options literal can set a
@@ -145,6 +156,20 @@ type Result struct {
 	Errors    map[string]error
 	Visited   []string
 	Truncated bool // MaxPages or MaxDepth stopped it early
+
+	// FromSitemap and FromLinks split Fetched by how each page was DISCOVERED:
+	// listed in a sitemap, or found by following an <a href>. The seed itself
+	// is neither, so the two never sum to Fetched — they sum to Fetched minus
+	// one whenever the seed was fetched successfully. A page listed in the
+	// sitemap AND linked from another page counts as sitemap, because that is
+	// where it entered the frontier.
+	FromSitemap int
+	FromLinks   int
+	// Sitemaps lists the sitemap documents that were fetched and parsed, in
+	// fetch order and normalised, so a caller can tell "no sitemap existed"
+	// from "the sitemap existed and was empty". Empty when Options.Sitemap is
+	// SitemapOff.
+	Sitemaps []string
 }
 
 // normalised is Options with every default filled in and every pattern
@@ -159,6 +184,7 @@ type normalised struct {
 	include   []*regexp.Regexp
 	exclude   []*regexp.Regexp
 	insecure  bool
+	sitemap   SitemapMode
 }
 
 func normalise(o Options) (normalised, error) {
@@ -170,6 +196,12 @@ func normalise(o Options) (normalised, error) {
 		userAgent: strings.TrimSpace(o.UserAgent),
 		robots:    !o.IgnoreRobots,
 		insecure:  o.Insecure,
+		sitemap:   o.Sitemap,
+	}
+	switch o.Sitemap {
+	case SitemapAuto, SitemapOnly, SitemapOff:
+	default:
+		return normalised{}, fmt.Errorf("crawl: unknown sitemap mode %d", int(o.Sitemap))
 	}
 	if o.MaxDepth < 0 {
 		n.maxDepth = defaultMaxDepth
@@ -230,10 +262,21 @@ func (n normalised) allowedByFilters(u string) bool {
 	return false
 }
 
-// item is one queued URL and the depth it was found at.
+// source records how a queued URL was discovered, so Result can report the
+// split without the caller having to guess.
+type source uint8
+
+const (
+	fromSeed source = iota
+	fromSitemap
+	fromLink
+)
+
+// item is one queued URL, the depth it was found at, and how it was found.
 type item struct {
 	url   string
 	depth int
+	src   source
 }
 
 // Crawl walks from seed, calling visit for each page it fetches.
@@ -244,6 +287,11 @@ type item struct {
 // The walk is breadth-first BY DEPTH: every URL at depth d is fetched before
 // any at depth d+1, so MaxDepth means what a reader expects and MaxPages
 // truncates the deepest pages rather than an arbitrary slice of the site.
+//
+// Unless Options.Sitemap says otherwise, the frontier is seeded from the site's
+// sitemap as well as from the seed URL — see SitemapMode and discoverSitemap for
+// where a sitemap is looked for. Sitemap URLs enter at depth 0 and are subject
+// to every gate a link is.
 //
 // A URL is fetched at most once. URLs are normalised before deduping — see
 // normaliseURL for exactly what that means — and, after a redirect, it is the
@@ -270,15 +318,54 @@ func Crawl(ctx context.Context, seed string, opts Options, visit func(Page) erro
 	seedNorm := normaliseURL(seedURL)
 
 	c := &crawler{
-		opts:   n,
-		client: newClient(n),
-		robots: map[string]*robotsFile{},
-		last:   map[string]time.Time{},
-		seen:   map[string]bool{},
+		opts:       n,
+		client:     newClient(n),
+		robots:     map[string]*robotsFile{},
+		robotsBody: map[string][]byte{},
+		last:       map[string]time.Time{},
+		seen:       map[string]bool{},
 	}
 
-	queue := []item{{url: seedNorm, depth: 0}}
+	queue := []item{{url: seedNorm, depth: 0, src: fromSeed}}
 	c.seen[seedNorm] = true
+
+	// Sitemap URLs are SEEDS, not discoveries: they enter at depth 0, so
+	// MaxDepth still governs how far link-following goes from each one, exactly
+	// as it does from the seed the caller typed.
+	if n.sitemap != SitemapOff {
+		// robots.txt is loaded first because its "Sitemap:" directives are the
+		// first place we look, and because it gates the seed anyway.
+		if err := c.loadRobots(ctx, seedURL); err != nil {
+			return res, err
+		}
+		for _, e := range c.discoverSitemap(ctx, seedURL) {
+			if err := ctx.Err(); err != nil {
+				return res, err
+			}
+			eu, err := parseAbsolute(e.Loc)
+			if err != nil {
+				continue // a <loc> that is not an absolute http(s) URL is not ours to fetch
+			}
+			norm := normaliseURL(eu)
+			if c.seen[norm] {
+				continue
+			}
+			c.seen[norm] = true
+			if n.sameHost && !sameHost(eu, seedURL) {
+				// A sitemap naming another host does not get to send us there.
+				res.Skipped++
+				continue
+			}
+			if !n.allowedByFilters(norm) {
+				res.Skipped++
+				continue
+			}
+			// robots.txt, MaxPages and the byte budget are enforced in the
+			// fetch loop below, which every queued URL goes through.
+			queue = append(queue, item{url: norm, depth: 0, src: fromSitemap})
+		}
+		res.Sitemaps = c.sitemapDocs
+	}
 
 	for len(queue) > 0 {
 		var next []item
@@ -333,9 +420,21 @@ func Crawl(ctx context.Context, seed string, opts Options, visit func(Page) erro
 
 			page.Depth = it.depth
 			res.Fetched++
+			switch it.src {
+			case fromSitemap:
+				res.FromSitemap++
+			case fromLink:
+				res.FromLinks++
+			}
 			res.Visited = append(res.Visited, finalURL)
 			if err := visit(page); err != nil {
 				return res, err
+			}
+
+			// SitemapOnly means the sitemap is authoritative: fetch what it
+			// lists and stop, rather than paying for a link walk on top.
+			if n.sitemap == SitemapOnly {
+				continue
 			}
 
 			// Links come out of HTML only. A PDF or a docx is worth mirroring,
@@ -374,7 +473,7 @@ func Crawl(ctx context.Context, seed string, opts Options, visit func(Page) erro
 					continue
 				}
 				c.seen[norm] = true
-				next = append(next, item{url: norm, depth: it.depth + 1})
+				next = append(next, item{url: norm, depth: it.depth + 1, src: fromLink})
 			}
 		}
 		queue = next
@@ -387,9 +486,15 @@ type crawler struct {
 	opts   normalised
 	client *http.Client
 	robots map[string]*robotsFile // origin -> rules (nil value = allow all)
-	last   map[string]time.Time   // host -> time of last request
-	seen   map[string]bool
-	bytes  int64
+	// robotsBody keeps the raw robots.txt per origin, because the "Sitemap:"
+	// directive is global and belongs to no User-agent group, so it is not part
+	// of the parsed rules. Keeping the bytes lets sitemap discovery read them
+	// without a second fetch.
+	robotsBody  map[string][]byte
+	last        map[string]time.Time // host -> time of last request
+	seen        map[string]bool
+	sitemapDocs []string // sitemap documents fetched and parsed, in order
+	bytes       int64
 }
 
 func newClient(n normalised) *http.Client {
@@ -489,29 +594,44 @@ func (c *crawler) robotsAllows(ctx context.Context, u *url.URL) (bool, error) {
 	if !c.opts.robots {
 		return true, nil
 	}
-	o := origin(u)
-	r, cached := c.robots[o]
-	if !cached {
-		if err := c.wait(ctx, u.Host, c.opts.delay); err != nil {
-			return false, err
-		}
-		body, _, _, err := c.get(ctx, o+"/robots.txt", maxRobotsBytes)
-		if err != nil {
-			// Missing, refused, or unreachable robots.txt means crawling is
-			// allowed. That is the standard's behaviour, not a failure.
-			if ctx.Err() != nil {
-				return false, ctx.Err()
-			}
-			r = nil
-		} else {
-			r = parseRobots(body, c.opts.userAgent)
-		}
-		c.robots[o] = r
+	if err := c.loadRobots(ctx, u); err != nil {
+		return false, err
 	}
+	r := c.robots[origin(u)]
 	if r == nil {
 		return true, nil
 	}
 	return r.allows(u.EscapedPath(), u.RawQuery), nil
+}
+
+// loadRobots fetches and caches robots.txt for u's origin, once. It is a no-op
+// when robots.txt is disabled or the origin is already cached, and the only
+// error it can return is the context's.
+func (c *crawler) loadRobots(ctx context.Context, u *url.URL) error {
+	if !c.opts.robots {
+		return nil
+	}
+	o := origin(u)
+	if _, cached := c.robots[o]; cached {
+		return nil
+	}
+	if err := c.wait(ctx, u.Host, c.opts.delay); err != nil {
+		return err
+	}
+	var r *robotsFile
+	body, _, _, err := c.get(ctx, o+"/robots.txt", maxRobotsBytes)
+	if err != nil {
+		// Missing, refused, or unreachable robots.txt means crawling is
+		// allowed. That is the standard's behaviour, not a failure.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	} else {
+		r = parseRobots(body, c.opts.userAgent)
+		c.robotsBody[o] = body
+	}
+	c.robots[o] = r
+	return nil
 }
 
 // parseAbsolute parses an absolute http(s) URL and rejects everything else.

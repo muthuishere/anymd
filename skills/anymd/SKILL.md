@@ -4,10 +4,11 @@ description: >-
   Convert any document to Markdown from the command line — read this PDF, DOCX,
   PPTX, XLSX, XLS, EPUB, MSG, HTML, CSV, JSON, RSS, IPYNB or ZIP; extract the
   text of a file so an LLM can read it; turn a folder of documents into Markdown
-  for a RAG index; batch-convert a directory; pull a URL down as Markdown; get a
-  spreadsheet as a GFM table. Use whenever a file is not plain text and you need
-  its contents as Markdown. One static binary, offline by default; opt in with
-  --llm to caption images, read a scanned PDF, or transcribe audio.
+  for a RAG index; batch-convert a directory; pull a URL down as Markdown; crawl
+  a docs site into a local Markdown mirror; get a spreadsheet as a GFM table.
+  Use whenever a file is not plain text and you need its contents as Markdown.
+  One static binary, offline by default; opt in with --llm to caption images,
+  read a scanned PDF, or transcribe audio.
 ---
 
 # anymd — any document → Markdown
@@ -32,6 +33,24 @@ scoop bucket add muthuishere https://github.com/muthuishere/scoop-bucket && scoo
 ```
 
 Check it: `anymd --version`. See what this build can do: `anymd --list`.
+
+### Install this skill
+
+The skill file is compiled into the binary, so anymd can put it where agents
+look for it — no checkout needed:
+
+```sh
+anymd skills install     # ~/.claude/skills/anymd and ~/.agents/skills/anymd
+anymd skills list        # per target: current / differs / not installed
+anymd skills path        # the target directories, one per line
+anymd skills uninstall   # remove only the files anymd installed
+```
+
+`--target claude|agents|all` picks the destination; `--dir PATH` names a skills
+root explicitly (`--dir .claude/skills` for a project-local one). An existing
+file that differs is **never** overwritten — anymd reports it and stops until
+you pass `--force`, because you may have edited your copy. `list` is the
+command that answers "why isn't my agent seeing it?".
 
 ## Use it
 
@@ -81,9 +100,65 @@ treats `-d` as a filename and fails. Write `anymd -r -d out docs/`.
 | `--title` | prepend `# Title` when the converter found one |
 | `-q, --quiet` | drop the per-file progress lines on stderr |
 | `--fail-fast` | stop at the first error instead of continuing |
+| `--insecure` | skip TLS verification when fetching (self-signed hosts only) |
 | `--list` / `--version` | registry / build info |
+| `--cache` | reuse a previous conversion of identical bytes |
+| `--crawl` | follow links from a URL argument — see "Crawling" below |
 | `--llm` | opt in to a vision model — see "LLM features" below |
-| `--llm-transcribe` | opt in to audio transcription (implies you also pass `--llm`) |
+| `--llm-transcribe` | opt in to audio transcription (pass `--llm` too) |
+
+## Caching — off by default
+
+anymd writes nothing to your disk unless asked. `--cache` turns on a
+content-addressed disk cache; it pays off when the same bytes are converted
+more than once (a docs pipeline, a re-run over a tree), and costs a hash for a
+one-shot conversion.
+
+```sh
+anymd --cache -r -d out/ docs/     # convert, reusing anything seen before
+anymd --no-cache report.pdf        # force a fresh conversion (wins over --cache)
+anymd --cache --cache-dir /tmp/c report.pdf
+
+anymd cache path    # where the cache lives (does not create it)
+anymd cache stats   # entry count and size on disk
+anymd cache clean   # reclaim the space (refuses paths outside the cache dir)
+```
+
+The key covers the input bytes, the anymd version, the converter registry and
+the output-affecting options, so **an upgrade invalidates every entry by
+itself** — you never need `cache clean` for correctness, only for disk space.
+`--cache-dir` without `--cache` is a usage error (exit 2), not a silent no-op.
+
+## Crawling a site — off by default
+
+Without `--crawl`, a URL argument is fetched exactly once and no link is
+followed. `--crawl` walks a site into a directory of Markdown, rewriting links
+between crawled pages to relative local paths so the result browses offline.
+
+```sh
+anymd --crawl --depth 2 -d out/ https://example.dev/docs/
+anymd --crawl --depth 3 --max-pages 500 --exclude '/blog/' -d site/ https://example.dev/
+```
+
+| flag | default | what it does |
+|---|---|---|
+| `--crawl` | off | follow links; **requires `-d DIR`** (never `-o`) |
+| `--depth N` | 1 | how many links deep (`--depth 0` = the seed page only) |
+| `--max-pages N` | 200 | hard cap on pages fetched |
+| `--crawl-delay D` | 500ms | wait between requests to one host; there is deliberately no way to ask for none |
+| `--same-host=false` | stays on host | allow leaving the seed's host |
+| `--include RE` / `--exclude RE` | — | regexps, repeatable; `--exclude` wins |
+| `--ignore-robots` | off | skip robots.txt — have a reason |
+
+Crawl output is files, so nothing goes to stdout; progress goes to stderr.
+Bad patterns, a negative depth, a missing `-d`, or a non-http argument are all
+usage errors (exit 2) raised **before** a single request goes out.
+
+**Rules for using this as an agent:** crawling someone's site is a different
+act from fetching one page. Do not raise `--depth`/`--max-pages` beyond what
+the user asked for, do not pass `--ignore-robots` on your own initiative, and
+do not lower `--crawl-delay` to go faster — a fast crawler is a denial of
+service.
 
 ## LLM features — opt-in, and they cost money
 
@@ -137,10 +212,13 @@ interpolation; an unset variable is an error naming the variable.
 ## The contract you can script against
 
 - **stdout is Markdown and nothing else.** Progress, warnings and errors go to
-  **stderr**, always, never interleaved. `anymd x.pdf | grep foo` is safe.
+  **stderr**, always, never interleaved. `anymd x.pdf | grep foo` is safe. The
+  subcommands keep the same split: only `cache path`, `config path`/`show`,
+  `skills path` and `skills list` write to stdout.
 - **Exit codes:** `0` everything converted · `1` one or more inputs failed ·
-  `2` you called it wrong (bad flag, `-o FILE` with several inputs). Branch on
-  these — `1` means the document was bad, `2` means your command was.
+  `2` you called it wrong (bad flag, `-o FILE` with several inputs, a flag that
+  needs `--llm`/`--cache`/`--crawl` without it). Branch on these — `1` means
+  the document was bad, `2` means your command was.
 - **Batch output is deterministic**, emitted in input order even though the
   work runs on a pool. Safe to diff and commit.
 - Colliding basenames in a batch get suffixed (`report.md`, `report-1.md`),
@@ -173,7 +251,8 @@ first three, at a per-call cost; nothing lifts the rest.
   metadata; the picture itself is not described unless `--llm` is given.
 - **No network at convert time** without `--llm`. A converter will not fetch a
   remote image, stylesheet, or linked article. Only an explicit `http(s)`
-  argument is fetched, and that happens before any converter runs.
+  argument — or a page reached by `--crawl` — is fetched, and that happens
+  before any converter runs.
 - Binary input with no matching converter is an **error (exit 1)**, never
   silent garbage. Anything that decodes as UTF-8 text falls through to
   plaintext.
@@ -184,7 +263,8 @@ first three, at a per-call cost; nothing lifts the rest.
 
 Use `anymd` when you need the **text** of a non-plain-text file: reading a
 user's PDF/DOCX/XLSX, feeding documents into an LLM context or a RAG index,
-diffing a document in CI, or converting a folder for a docs pipeline.
+mirroring a docs site for offline reading, diffing a document in CI, or
+converting a folder for a docs pipeline.
 
 ## When NOT to use it
 
@@ -197,6 +277,8 @@ diffing a document in CI, or converting a folder for a docs pipeline.
   extracts text and structure, not appearance.
 - You need to **write** a document (produce a `.docx`/`.xlsx`) — anymd is
   one-directional.
+- You need a JS-rendered page — `--crawl` reads HTML as served, it does not run
+  a browser.
 - You are inside Go code — import the library instead of shelling out:
   `anymd.ConvertFile("report.docx")`.
 
@@ -217,8 +299,12 @@ Also `anymd.ConvertBytes(b, info)`, `anymd.Convert(reader, info)`, and
 
 - `no converter accepted this stream` → give it a hint: `-t docx`. On stdin
   there is no filename, so a hint is often required.
+- An agent cannot see the skill → `anymd skills list`. `differs` means an old
+  or edited copy is installed; `not installed` means run `anymd skills install`.
+  Restart the agent if it caches its skill list.
 - `--version` prints `dev` → a `go install` or source build; that is normal and
-  not a bug.
+  not a bug. Note that such a build has no VCS stamp, so `--cache` keys are
+  constant across rebuilds; use `--no-cache` while developing anymd itself.
 - Mojibake in the output → `--charset` overrides the detected encoding.
 - Reading a hostile/untrusted document? Run it in a separate process with a
   memory limit and a timeout. anymd bounds its allocations but is not a sandbox

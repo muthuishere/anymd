@@ -154,6 +154,7 @@ const usage = `anymd — convert any document to Markdown (pure Go, no cgo)
 usage: anymd [flags] [file|url ...]
        anymd config <path|show|init> [--llm-config FILE]
        anymd cache  <path|stats|clean> [--cache-dir DIR]
+       anymd skills <install|list|path|uninstall> [--target T] [--dir PATH]
        anymd --crawl --depth 2 -d out/ https://example.dev/
 
   With no arguments (or "-") anymd reads stdin and writes Markdown to stdout.
@@ -204,6 +205,16 @@ cache subcommand:
   anymd cache stats   entry count and size on disk
   anymd cache clean   remove cached entries (refuses paths outside the cache dir)
 
+skills subcommand — install the agent skill so AI coding agents can find anymd:
+  anymd skills install    write the built-in SKILL.md into ~/.claude/skills/anymd
+                          and ~/.agents/skills/anymd (never overwriting a file
+                          you changed; pass --force for that)
+  anymd skills list       per target: current / differs / not installed
+  anymd skills path       print the target directories, one per line
+  anymd skills uninstall  remove only the files anymd installed
+  --target claude|agents|all (default all) · --dir PATH for a project-local
+  skills directory, e.g. --dir .claude/skills · --force to overwrite/remove
+
 exit codes: 0 all converted · 1 one or more failed · 2 usage error
 `
 
@@ -217,6 +228,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(args) > 0 && args[0] == "cache" {
 		return runCacheCommand(args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "skills" {
+		return runSkills(args[1:], stdout, stderr)
 	}
 
 	cfg := &config{}

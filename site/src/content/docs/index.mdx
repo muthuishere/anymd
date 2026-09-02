@@ -66,7 +66,7 @@ $ head -4 report.md
 		<span class="am-stat-label">peak RSS, against 160 MB</span>
 	</li>
 	<li>
-		<span class="am-stat-value">17 MB</span>
+		<span class="am-stat-value">15 MB</span>
 		<span class="am-stat-label">one binary, against a 318 MB venv</span>
 	</li>
 	<li>
@@ -126,7 +126,7 @@ the honest number for a long-running service.
 | test.pdf | 3.44 ms | 74.47 ms | **22×** |
 | test_wikipedia.html (385K) | 11.55 ms | 104.15 ms | **9.0×** |
 | Peak RSS (test_wikipedia.html) | **27 MB** | 160 MB | |
-| Install footprint | **17 MB** (one binary) | 318 MB (venv + deps) | |
+| Install footprint | **15 MB** (one binary) | 318 MB (venv + deps) | |
 
 markitdown also pays **309 ms** of Python import and init on *every* invocation — real for a
 shell pipeline, irrelevant to a long-running service, which is why both tables live on the
