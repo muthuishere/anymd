@@ -2,12 +2,10 @@ package anymd
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"image"
 	"io"
 	"math"
-	"net/http"
 	"strconv"
 	"strings"
 
@@ -322,29 +320,4 @@ func valueOf(t exif.ExifTag) string {
 // stays "50" rather than "50.000000".
 func trimFloat(v float64) string {
 	return strconv.FormatFloat(v, 'f', -1, 64)
-}
-
-// describeImage asks the caller's Describer to caption the image, and returns
-// "" when there is no Describer or the call fails.
-//
-// A Describer failure is deliberately NOT an error for the document: a model
-// outage or a rate limit should cost you the caption, not the conversion. The
-// rest of the output — placeholder, dimensions, EXIF — is still correct.
-func describeImage(b []byte, info StreamInfo, opts *Options) string {
-	if opts == nil || opts.Describer == nil {
-		return ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), opts.llmTimeout())
-	defer cancel()
-
-	mime := info.NormalizedMime()
-	if mime == "" || !strings.HasPrefix(mime, "image/") {
-		mime = http.DetectContentType(b)
-	}
-
-	caption, err := opts.Describer.Describe(ctx, b, mime, "")
-	if err != nil || strings.TrimSpace(caption) == "" {
-		return ""
-	}
-	return strings.TrimSpace(caption)
 }
