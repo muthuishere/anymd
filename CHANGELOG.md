@@ -227,8 +227,9 @@ the cost and the data boundary.
 
 - `.xls` formula **results** come back as a placeholder (a BIFF reader limit),
   and Excel's own date formats are not applied.
-- PDF layout columns, figures and form fields are not reconstructed; only the
-  text layer is extracted.
+- PDF figures and form fields are not reconstructed, and almost no tables or
+  headings are emitted from PDF; only the text layer is extracted, in
+  column-aware reading order.
 - HTML that requires JavaScript execution renders as whatever is in the source.
 - Encrypted zips and DRM'd EPUBs are refused.
 - `.msg` attachments, RTF-compressed bodies and recipient storages are skipped.
