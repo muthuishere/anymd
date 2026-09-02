@@ -218,7 +218,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	cfg := &config{}
 	fs := newFlagSet(cfg, stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(permuteArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
 		}
@@ -1089,4 +1089,66 @@ func configInit(path string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "wrote %s (mode 0600)\n", path)
 	fmt.Fprintf(stdout, "Set $%s in your environment, then: anymd --llm doc.pdf\n", keyEnvVars[0])
 	return exitOK
+}
+
+// permuteArgs moves flags ahead of positional arguments so they may be written
+// in either order.
+//
+// Go's flag package stops at the first non-flag argument, which makes
+//
+//	anymd report.docx -o report.md
+//
+// fail with "stat -o: no such file or directory" — the flag and its value are
+// read as filenames. That is the exact form markitdown documents, and Python's
+// argparse permutes, so anyone copying an invocation across hits it. GNU
+// getopt permutes too; Go is the outlier.
+//
+// Everything after a literal "--" is left alone, which is how a file genuinely
+// named "-o" stays reachable.
+func permuteArgs(args []string) []string {
+	flags := make([]string, 0, len(args))
+	rest := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			rest = append(rest, args[i+1:]...)
+			break
+		}
+		if len(a) < 2 || a[0] != '-' {
+			rest = append(rest, a)
+			continue
+		}
+		// "-" alone is stdin, not a flag.
+		if a == "-" {
+			rest = append(rest, a)
+			continue
+		}
+		flags = append(flags, a)
+		// A flag written as "-o value" consumes the next argument; one written
+		// as "-o=value" does not. Booleans never do, so consulting the FlagSet
+		// is the only way to tell them apart.
+		if !strings.Contains(a, "=") && flagTakesValue(a) && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+	return append(flags, rest...)
+}
+
+// flagTakesValue reports whether the named flag consumes the following
+// argument. A boolean flag does not.
+func flagTakesValue(arg string) bool {
+	name := strings.TrimLeft(arg, "-")
+	if name == "" {
+		return false
+	}
+	probe := &config{}
+	fs := newFlagSet(probe, io.Discard)
+	f := fs.Lookup(name)
+	if f == nil {
+		return false // unknown flag: let flag.Parse produce the real error
+	}
+	bf, ok := f.Value.(interface{ IsBoolFlag() bool })
+	return !ok || !bf.IsBoolFlag()
 }

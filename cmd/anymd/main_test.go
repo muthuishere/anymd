@@ -687,3 +687,58 @@ func TestLLMTranscribeWiring(t *testing.T) {
 		t.Fatalf("stderr = %q", se.String())
 	}
 }
+
+// TestFlagsMayFollowFilenames pins markitdown compatibility. Go's flag package
+// stops at the first positional, so `anymd report.docx -o report.md` — the form
+// markitdown's own --help documents — used to fail with
+// "stat -o: no such file or directory".
+func TestFlagsMayFollowFilenames(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "report.csv")
+	if err := os.WriteFile(src, []byte("a,b\n1,2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "report.md")
+
+	var out, errOut bytes.Buffer
+	if code := run([]string{src, "-o", dst}, &out, &errOut); code != exitOK {
+		t.Fatalf("exit = %d, stderr = %q", code, errOut.String())
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("output not written: %v", err)
+	}
+	if !strings.Contains(string(got), "| a | b |") {
+		t.Errorf("unexpected output: %q", got)
+	}
+}
+
+// A "--" terminator must still reach a file whose name looks like a flag.
+func TestDoubleDashStopsPermutation(t *testing.T) {
+	dir := t.TempDir()
+	odd := filepath.Join(dir, "-o")
+	if err := os.WriteFile(odd, []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--", odd}, &out, &errOut); code != exitOK {
+		t.Fatalf("exit = %d, stderr = %q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "hello") {
+		t.Errorf("stdout = %q", out.String())
+	}
+}
+
+// permuteArgs must not swallow the argument after a boolean flag.
+func TestPermuteArgsKeepsBooleanOperands(t *testing.T) {
+	got := permuteArgs([]string{"a.csv", "-q", "b.csv"})
+	want := []string{"-q", "a.csv", "b.csv"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}

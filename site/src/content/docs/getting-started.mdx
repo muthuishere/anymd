@@ -164,22 +164,6 @@ For bytes you already hold, `anymd.ConvertBytes(b, info)`; for any reader,
 `anymd.Convert(r, info)`.
 
 </TabItem>
-<TabItem label="Python (markitdown)">
-
-The tool anymd is an alternative to, for comparison:
-
-```python
-from markitdown import MarkItDown
-
-md = MarkItDown()
-result = md.convert("report.docx")
-print(result.text_content)
-```
-
-anymd is the same idea with a different set of trade-offs: no interpreter, no
-wheels, no convert-time network calls unless you ask for them.
-
-</TabItem>
 </Tabs>
 
 ## What the defaults do not do

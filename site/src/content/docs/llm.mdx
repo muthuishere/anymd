@@ -66,18 +66,6 @@ res, err := anymd.Default().ConvertFile("document_with_images.pdf",
 ```
 
 </TabItem>
-<TabItem label="Python (markitdown)">
-
-```python
-from markitdown import MarkItDown
-from openai import OpenAI
-
-md = MarkItDown(llm_client=OpenAI(), llm_model="gpt-4o")
-result = md.convert("document_with_images.pdf")
-print(result.text_content)
-```
-
-</TabItem>
 </Tabs>
 
 The flags are on the [CLI page](/anymd/cli/#llm-flags). Every one of them except
