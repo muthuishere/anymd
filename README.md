@@ -149,6 +149,33 @@ to the plaintext converter; genuinely binary input with no converter is an error
 (exit 1), never silent garbage. `anymd --list` prints the live registry in dispatch
 order, which is always the authoritative answer for the build you have.
 
+### Benchmarks vs markitdown
+
+Measured on the 31 files in markitdown's own test suite. Full method and the
+reproducible script: [`bench/`](bench/).
+
+| | anymd | markitdown 0.1.5 |
+|---|---:|---:|
+| docx (in-process) | **0.56 ms** | 17.29 ms |
+| xlsx (in-process) | **0.56 ms** | 7.44 ms |
+| 385K HTML (in-process) | **12.04 ms** | 101.58 ms |
+| pdf (in-process) | **45.69 ms** | 77.27 ms |
+| CLI startup overhead | **none** | 299 ms per invocation |
+| Peak RSS (385K HTML) | **26 MB** | 162 MB |
+| Install footprint | **17 MB** binary | 318 MB venv |
+| Files with substantive output | 19/31 | 19/31 |
+
+Two honest caveats. **PDF is only 1.7×** — both tools are dominated by the PDF
+parser, so a PDF-heavy corpus will not see order-of-magnitude gains.
+**markitdown transcribes audio and we do not**; it does so by calling a remote
+speech service, which is the convert-time network access anymd deliberately
+avoids.
+
+Where anymd refuses a file, markitdown often returns an empty string and exit 0
+— on the scanned PDF and on both test images. For an ingestion pipeline that is
+the worse failure: silently indexing nothing looks exactly like a document that
+had no text. anymd returns `ErrNoTextLayer` so you can route it to OCR.
+
 ### Verified against markitdown's own corpus
 
 `anymd` is checked against the 31 test files in Microsoft markitdown's own test
