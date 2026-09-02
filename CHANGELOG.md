@@ -14,6 +14,60 @@ treated as stable from `0.1.0` onward.
 
 ### Added
 
+- **Optional LLM features — off by default.** anymd can now read what it
+  previously could only skip, when the caller explicitly supplies a model.
+  Nothing here changes the default build: with no `Describer`/`Transcriber` and
+  no `--llm`, output is byte-identical to `0.1.0` and no network call is made.
+  See [ADR 0001](docs/adr/0001-pure-go-no-cgo-no-network.md) for why that line
+  is drawn where it is.
+
+  - **Scanned PDFs are readable.** A PDF with no text layer used to return
+    `ErrNoTextLayer` and stop. With a `Describer` it now extracts the page's
+    image XObjects and has them read. Verified end to end against a live model
+    on the corpus's scanned medical report — the file markitdown returns
+    0 bytes and exit 0 for. No rasterization is involved: there is no pure-Go
+    PDF renderer and a cgo one would end the single-binary promise, so the
+    embedded images are lifted from the object graph instead. `DCTDecode`
+    (the usual scan encoding) passes through untouched; `JPXDecode` passes
+    through; 8-bit Flate RGB/Gray is re-encoded to PNG. **Not supported, and
+    skipped silently rather than guessed:** `CCITTFaxDecode` — which is most
+    pre-2005 office scanning — plus JBIG2, LZW, indexed and CMYK colorspaces,
+    and non-8-bit depths.
+  - **Images in `.docx` and `.pptx` are captioned**, with the author's own alt
+    text passed to the model as a hint rather than discarded.
+  - **Standalone images are captioned**, alongside the existing dimensions and
+    EXIF.
+  - **Audio is transcribed** (`.mp3 .m4a .wav .flac .ogg .webm .mp4`), closing
+    the last format gap against markitdown. Requires a `Transcriber`; without
+    one the converter *declines* in `Accepts`, so the engine still returns the
+    honest `ErrUnsupported` rather than accepting and then failing.
+  - Corpus coverage with `--llm`: **27 of 31**, up from 26.
+
+- `Options.Describer`, `Options.Transcriber`, `Options.LLMTimeout`, and the
+  `Describer` / `Transcriber` interfaces (`llm.go`). These are interfaces, not a
+  vendor SDK — a local model, a hosted API or a test stub all satisfy them.
+- `llm` package: a `Describer` built on
+  [toolnexus](https://github.com/muthuishere/toolnexus) (which already handles
+  keys, retries, backoff and the OpenAI-vs-Anthropic wire difference) and a
+  `Transcriber` written against `/audio/transcriptions` directly, since
+  toolnexus drives chat completions only.
+- **Config file** at `~/.config/anymd/anymdconfig.json` — `llm.Load`,
+  `llm.ConfigPath`, `llm.FromConfigFile`. Every string field supports `${VAR}`
+  interpolation from the environment, which is how a key stays out of the file.
+  An unset `${VAR}` is a hard error naming the *variable*: expanding it to `""`
+  would send an unauthenticated request and surface as a baffling 401. Errors
+  never contain a value. Not `os.UserConfigDir()`, which on macOS resolves to
+  `~/Library/Application Support`.
+- **CLI**: `--llm`, `--llm-model`, `--llm-base-url`, `--llm-config`,
+  `--llm-timeout`, `--llm-transcribe`, `--llm-transcribe-model`. Any `--llm-*`
+  flag without `--llm` is a usage error (exit 2) rather than silently ignored.
+  Precedence: explicit flag > config file > environment > default.
+- **CLI**: `anymd config path | show | init`. `show` redacts every secret —
+  it parses the raw file rather than the interpolated config, and covers the
+  three leak paths (an interpolated key, a literal header, credentials inside a
+  proxy URL). `init` writes `0600` with `O_EXCL`, so it cannot clobber a config
+  written a moment earlier.
+
 - `docs/adr/` — architecture decision records, with
   [0001](docs/adr/0001-pure-go-no-cgo-no-network.md) (pure Go, and no network
   the caller did not ask for — why the first half is an invariant and the
@@ -23,6 +77,15 @@ treated as stable from `0.1.0` onward.
 - `CONTRACT.md` rule 8: what vendoring third-party code requires.
 
 ### Changed
+
+- **`--llm` costs money and sends document content to a third party.** One
+  model call per captioned image, one per transcribed file. Guards are built in:
+  identical images are deduplicated by sha256 (one logo across 60 slides is one
+  call), images under 4 KiB are skipped as furniture, and per-document ceilings
+  cap runaway documents (50 captions, 20 scanned pages). A captioning failure
+  degrades to the previous output; a *transcription* failure is a hard error,
+  because the transcript is the document and an empty success would be exactly
+  the silent-nothing behaviour this project criticises.
 
 - **PDF conversion is ~13x faster** (markitdown's `test.pdf`: 45.39 ms -> 3.44 ms
   in-process; `BenchmarkConvertPdf` 42.6 ms / 1,565,898 allocs / 75 MB ->

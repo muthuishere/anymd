@@ -1060,7 +1060,7 @@ func configInit(path string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "anymd: %v\n", err)
 		return exitFail
 	}
-	if _, err := io.WriteString(f, starterConfig); err != nil {
+	if _, err := f.WriteString(starterConfig); err != nil {
 		f.Close()
 		fmt.Fprintf(stderr, "anymd: %v\n", err)
 		return exitFail
