@@ -154,11 +154,10 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 // targets
 // ---------------------------------------------------------------------------
 
-// skillTarget is one resolved destination. root is the skills directory an
-// agent scans; dir is root/anymd, the only place this command ever writes.
+// skillTarget is one resolved destination: <skills root>/anymd, the only place
+// this command ever writes or deletes.
 type skillTarget struct {
-	name string
-	dir  string
+	dir string
 }
 
 // skillTargets resolves --target / --dir into the destinations to act on.
@@ -173,17 +172,17 @@ func skillTargets(target, dir string) ([]skillTarget, error) {
 		// have just read out of `skills path`. Treating it as a skills root
 		// would bury the skill in .../anymd/anymd, where no agent looks.
 		if filepath.Base(abs) == skillDirName {
-			return []skillTarget{{name: "dir", dir: abs}}, nil
+			return []skillTarget{{dir: abs}}, nil
 		}
-		return []skillTarget{{name: "dir", dir: filepath.Join(abs, skillDirName)}}, nil
+		return []skillTarget{{dir: filepath.Join(abs, skillDirName)}}, nil
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot find your home directory (%v); pass --dir PATH", err)
 	}
-	claude := skillTarget{name: "claude", dir: filepath.Join(home, ".claude", "skills", skillDirName)}
-	agents := skillTarget{name: "agents", dir: filepath.Join(home, ".agents", "skills", skillDirName)}
+	claude := skillTarget{dir: filepath.Join(home, ".claude", "skills", skillDirName)}
+	agents := skillTarget{dir: filepath.Join(home, ".agents", "skills", skillDirName)}
 
 	switch target {
 	case "", "all":
