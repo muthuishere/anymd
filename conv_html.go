@@ -4,15 +4,16 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
 	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/marker"
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/base"
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/commonmark"
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/strikethrough"
-	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/table"
 	"github.com/muthuishere/anymd/internal/mdutil"
 	"github.com/saintfish/chardet"
 	"golang.org/x/net/html"
@@ -60,8 +61,8 @@ func (c *HTMLConverter) Accepts(r io.ReadSeeker, info StreamInfo, opts *Options)
 		return false
 	}
 	s := strings.ToLower(string(head[:n]))
-	for _, marker := range []string{"<!doctype html", "<html", "<head", "<body"} {
-		if strings.Contains(s, marker) {
+	for _, opener := range []string{"<!doctype html", "<html", "<head", "<body"} {
+		if strings.Contains(s, opener) {
 			return true
 		}
 	}
@@ -360,7 +361,7 @@ var htmlConv = sync.OnceValue(func() *converter.Converter {
 			base.NewBasePlugin(),
 			commonmark.NewCommonmarkPlugin(),
 			// GitHub-flavored extras: real pipe tables and ~~strikethrough~~.
-			table.NewTablePlugin(),
+			htmlTablePlugin{},
 			strikethrough.NewStrikethroughPlugin(),
 		),
 	)
@@ -383,4 +384,380 @@ func renderHTMLNode(doc *html.Node, baseURL string) (md string, err error) {
 		return "", err
 	}
 	return strings.TrimRight(string(out), "\n"), nil
+}
+
+// - - - - - - - - - - - - - - tables - - - - - - - - - - - - - - //
+//
+// Tables are rendered here rather than by html-to-markdown's `table` plugin.
+// That plugin gives up on the shapes real HTML is full of — a table with no
+// <th> anywhere, a cell holding a <p> or a <ul>, a cell with a <br> in it —
+// and falls back to emitting the cell text as loose paragraphs, which is a
+// table silently deleted at exit 0. Measured against docling's ground truth
+// (bench/run-quality.sh, ADR 0003) that cost html a tables score of 0.69
+// against markitdown's 0.98: eight of the corpus's twenty-two tables came out
+// as no table at all.
+//
+// Rendering it ourselves also satisfies the rule in CONTRACT.md that every
+// table in the project goes through mdutil.Table, so a table lifted out of an
+// .html page, an .xlsx sheet and a .docx body are byte-identical.
+
+// htmlTableCtxKey marks the render context as being inside a table cell.
+// GFM has no nested tables, so a <table> found under this flattens to text —
+// which is also what docling does.
+type htmlTableCtxKey struct{}
+
+// Bounds on the grid a single <table> may expand to. rowspan/colspan are
+// attacker-controlled integers and a pair of them multiply, so a 30-byte
+// table can otherwise ask for billions of cells.
+const (
+	htmlTableMaxCols  = 512
+	htmlTableMaxRows  = 4096
+	htmlTableMaxCells = 1 << 16
+)
+
+// htmlTablePlugin is the converter plugin that installs the table renderer.
+type htmlTablePlugin struct{}
+
+func (htmlTablePlugin) Name() string { return "anymd-table" }
+
+func (htmlTablePlugin) Init(conv *converter.Converter) error {
+	// Keep the pipe escaped in ordinary prose, as the upstream plugin did.
+	conv.Register.EscapedChar('|')
+
+	// The table parts are block-level: that is what makes the whitespace
+	// collapse treat a cell boundary as a boundary, so <td>A</td><td>B</td>
+	// does not come out as one run of text.
+	for _, tag := range []string{"table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption"} {
+		conv.Register.TagType(tag, converter.TagTypeBlock, converter.PriorityStandard)
+	}
+	conv.Register.Renderer(htmlRenderTable, converter.PriorityStandard)
+	conv.Register.Renderer(htmlRenderCaptionedImage, converter.PriorityEarly)
+	return nil
+}
+
+// htmlRenderTable renders one <table> as a GFM pipe table via mdutil.Table.
+func htmlRenderTable(ctx converter.Context, w converter.Writer, n *html.Node) converter.RenderStatus {
+	if n.Type != html.ElementNode || n.DataAtom != atom.Table {
+		return converter.RenderTryNext
+	}
+	// A layout table is not data. Let the generic fallback render its content
+	// as ordinary flow, which is what the upstream plugin did by default.
+	switch strings.ToLower(htmlAttr(n, "role")) {
+	case "presentation", "none":
+		return converter.RenderTryNext
+	}
+	if ctx.Value(htmlTableCtxKey{}) != nil {
+		// Nested table: flatten to its text, in document order.
+		w.WriteString(htmlTableFlatText(n))
+		return converter.RenderSuccess
+	}
+
+	grid := htmlTableGrid(n)
+	caption := ""
+	if c := htmlTableCaption(n); c != nil {
+		caption = mdutil.Collapse(htmlNodeText(c))
+	}
+	if len(grid) == 0 && caption == "" {
+		// Nothing to render, but the node is handled: an empty <table> must
+		// not fall through to the generic block fallback and emit blank lines.
+		return converter.RenderSuccess
+	}
+
+	inner := ctx.WithValue(htmlTableCtxKey{}, true)
+	rendered := make(map[*html.Node]string, len(grid))
+	rows := make([][]string, len(grid))
+	for i, row := range grid {
+		rows[i] = make([]string, len(row))
+		for j, cell := range row {
+			if cell == nil {
+				continue
+			}
+			md, ok := rendered[cell]
+			if !ok {
+				md = htmlCellMarkdown(inner, cell)
+				rendered[cell] = md
+			}
+			rows[i][j] = md
+		}
+	}
+
+	w.WriteString("\n\n")
+	if caption != "" {
+		w.WriteString(caption)
+		w.WriteString("\n\n")
+	}
+	// header is nil so mdutil.Table promotes the first row, which is what a
+	// GFM table requires and what docling's ground truth does for a table
+	// whose first row is <td> rather than <th>.
+	w.WriteString(mdutil.Table(nil, rows))
+	w.WriteString("\n\n")
+	return converter.RenderSuccess
+}
+
+// htmlRenderCaptionedImage drops the alt text of an <img> that sits in a
+// <figure> with a <figcaption>. The caption already describes the image, so
+// inlining the alt as well emits the same description twice — which is both
+// noise and, measured against docling's ground truth, a content-F1 loss.
+// Every other image keeps its alt: it is the only text an image contributes.
+func htmlRenderCaptionedImage(ctx converter.Context, w converter.Writer, n *html.Node) converter.RenderStatus {
+	if n.Type != html.ElementNode || n.DataAtom != atom.Img || !htmlHasFigcaption(n) {
+		return converter.RenderTryNext
+	}
+	src := strings.TrimSpace(htmlAttr(n, "src"))
+	if src == "" {
+		return converter.RenderSuccess
+	}
+	w.WriteString("![](")
+	w.WriteString(ctx.AssembleAbsoluteURL(ctx, "img", src))
+	w.WriteString(")")
+	return converter.RenderSuccess
+}
+
+// htmlHasFigcaption reports whether the node has a <figure> ancestor that
+// carries a <figcaption>.
+func htmlHasFigcaption(n *html.Node) bool {
+	for p := n.Parent; p != nil; p = p.Parent {
+		if p.Type != html.ElementNode || p.DataAtom != atom.Figure {
+			continue
+		}
+		for c := p.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type == html.ElementNode && c.DataAtom == atom.Figcaption {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// htmlCellMarkdown renders one cell's children to the inline markdown that
+// goes inside a pipe. Block children (<p>, <ul>, <pre>) render normally and
+// are flattened to one line by mdutil.EscapeCell, since a newline anywhere
+// inside a GFM table terminates it.
+func htmlCellMarkdown(ctx converter.Context, cell *html.Node) string {
+	htmlDemoteHeadings(cell)
+
+	var buf strings.Builder
+	ctx.RenderChildNodes(ctx, &buf, cell)
+	s := buf.String()
+	// Code blocks carry their newlines as a private marker rune that is only
+	// turned back into a newline after rendering; flatten those too, or the
+	// table splits apart later.
+	s = strings.ReplaceAll(s, string(marker.MarkerCodeBlockNewline), " ")
+	// A pipe inside a cell is escaped by mdutil.EscapeCell, so drop the
+	// renderer's own pending escape for it — leaving both in place emits the
+	// backslash twice.
+	s = strings.ReplaceAll(s, string(marker.MarkerEscaping)+"|", "|")
+	return strings.ReplaceAll(s, "\r", " ")
+}
+
+// htmlDemoteHeadings turns h1..h6 inside a table cell into paragraphs. A
+// heading is a document-level structure; "# A" inside a pipe is not a heading
+// and would only add stray hashes to the cell.
+func htmlDemoteHeadings(cell *html.Node) {
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type == html.ElementNode {
+				switch c.DataAtom {
+				case atom.H1, atom.H2, atom.H3, atom.H4, atom.H5, atom.H6:
+					c.DataAtom, c.Data = atom.P, "p"
+				}
+			}
+			walk(c)
+		}
+	}
+	walk(cell)
+}
+
+// htmlTableFlatText renders a table as plain text for a context that cannot
+// hold one — inside another table's cell, since GFM has no nested tables.
+//
+// It cannot use htmlNodeText: by the time the renderer runs, the whitespace
+// between </td><td> has already been collapsed away, so concatenating the text
+// nodes would weld "A1" and "B1" into "A1B1". A separator is emitted at every
+// cell, row and line boundary instead.
+func htmlTableFlatText(n *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		switch {
+		case n.Type == html.TextNode:
+			b.WriteString(n.Data)
+			return
+		case n.Type == html.ElementNode && !htmlInlineRun[n.DataAtom]:
+			// Every element boundary except a pure character-styling one is a
+			// word boundary here.
+			b.WriteByte(' ')
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(n)
+	return mdutil.Collapse(b.String())
+}
+
+// htmlInlineRun lists the elements that only style the characters they wrap,
+// and so do not separate one word from the next.
+var htmlInlineRun = map[atom.Atom]bool{
+	atom.B: true, atom.Strong: true, atom.I: true, atom.Em: true,
+	atom.U: true, atom.S: true, atom.Strike: true, atom.Del: true,
+	atom.Ins: true, atom.Mark: true, atom.Small: true, atom.Big: true,
+	atom.Sub: true, atom.Sup: true, atom.Font: true, atom.Span: true,
+	atom.Abbr: true, atom.Bdi: true, atom.Bdo: true, atom.Wbr: true,
+}
+
+// htmlTableCaption returns the table's own <caption>, or nil.
+func htmlTableCaption(table *html.Node) *html.Node {
+	for c := table.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && c.DataAtom == atom.Caption {
+			return c
+		}
+	}
+	return nil
+}
+
+// htmlTableGrid expands a table into a rectangular grid of cell nodes,
+// mirroring a rowspan/colspan cell into every position it covers. Mirroring
+// rather than blanking is deliberate: it is what docling's ground truth does,
+// and it keeps a spanned header label attached to every column it labels.
+//
+// The returned rows all have the same length; a position no cell reached is
+// nil.
+func htmlTableGrid(table *html.Node) [][]*html.Node {
+	rows := htmlTableRows(table)
+	if len(rows) > htmlTableMaxRows {
+		rows = rows[:htmlTableMaxRows]
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	grid := make([][]*html.Node, len(rows))
+	at := func(r, c int) *html.Node {
+		if r < len(grid) && c < len(grid[r]) {
+			return grid[r][c]
+		}
+		return nil
+	}
+	set := func(r, c int, n *html.Node) {
+		for len(grid[r]) <= c {
+			grid[r] = append(grid[r], nil)
+		}
+		grid[r][c] = n
+	}
+
+	placed := 0
+	for r, tr := range rows {
+		col := 0
+		for _, cell := range htmlRowCells(tr) {
+			for col < htmlTableMaxCols && at(r, col) != nil {
+				col++
+			}
+			if col >= htmlTableMaxCols || placed >= htmlTableMaxCells {
+				break
+			}
+			rs := htmlSpan(cell, "rowspan", len(rows)-r)
+			cs := htmlSpan(cell, "colspan", htmlTableMaxCols-col)
+			for dr := 0; dr < rs && placed < htmlTableMaxCells; dr++ {
+				for dc := 0; dc < cs && placed < htmlTableMaxCells; dc++ {
+					set(r+dr, col+dc, cell)
+					placed++
+				}
+			}
+			col += cs
+		}
+	}
+
+	width := 0
+	for _, row := range grid {
+		if len(row) > width {
+			width = len(row)
+		}
+	}
+	if width == 0 {
+		return nil
+	}
+	out := make([][]*html.Node, 0, len(grid))
+	for _, row := range grid {
+		full := make([]*html.Node, width)
+		copy(full, row)
+		empty := true
+		for _, c := range full {
+			if c != nil {
+				empty = false
+				break
+			}
+		}
+		if empty {
+			continue
+		}
+		out = append(out, full)
+	}
+	return out
+}
+
+// htmlTableRows collects the <tr> elements belonging to this table, in
+// document order, without descending into a nested table's rows.
+func htmlTableRows(table *html.Node) []*html.Node {
+	var rows []*html.Node
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type != html.ElementNode {
+				continue
+			}
+			switch c.DataAtom {
+			case atom.Table:
+				// belongs to the nested table, not to us
+			case atom.Tr:
+				rows = append(rows, c)
+			default:
+				walk(c)
+			}
+		}
+	}
+	walk(table)
+	return rows
+}
+
+// htmlRowCells returns the <td>/<th> children of one row.
+func htmlRowCells(tr *html.Node) []*html.Node {
+	var cells []*html.Node
+	for c := tr.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && (c.DataAtom == atom.Td || c.DataAtom == atom.Th) {
+			cells = append(cells, c)
+		}
+	}
+	return cells
+}
+
+// htmlSpan reads a rowspan/colspan attribute, clamped to [1, max]. HTML's
+// rowspan="0" means "to the end of the section", which clamps to max here;
+// anything unparseable is one cell.
+func htmlSpan(cell *html.Node, name string, max int) int {
+	if max < 1 {
+		return 1
+	}
+	v := strings.TrimSpace(htmlAttr(cell, name))
+	if v == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 1
+	}
+	if n == 0 || n > max {
+		return max
+	}
+	return n
+}
+
+// htmlAttr returns an element's attribute value, or "".
+func htmlAttr(n *html.Node, name string) string {
+	for _, a := range n.Attr {
+		if a.Key == name {
+			return a.Val
+		}
+	}
+	return ""
 }

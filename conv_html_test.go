@@ -87,10 +87,10 @@ func TestHTMLTableListsLinksAndEntities(t *testing.T) {
 		"  - alpha two\n" +
 		"- beta\n" +
 		"\n" +
-		"| Name      | Qty |\n" +
-		"|-----------|-----|\n" +
-		"| Widget    | 3   |\n" +
-		"| Gadget\\|X | 12  |\n"
+		"| Name | Qty |\n" +
+		"| --- | --- |\n" +
+		"| Widget | 3 |\n" +
+		"| Gadget\\|X | 12 |\n"
 	if res.Markdown != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", res.Markdown, want)
 	}
@@ -247,5 +247,223 @@ func TestDecodeHTMLBytesFallbacks(t *testing.T) {
 	// An unknown label must not be fatal; we fall through to detection.
 	if got := DecodeHTMLBytes([]byte("plain"), "not-a-real-charset"); got != "plain" {
 		t.Errorf("unknown label = %q", got)
+	}
+}
+
+// htmlMD converts an HTML fragment through the shared path every HTML-bearing
+// converter uses (rss, epub, msg), which is also what the .html converter runs.
+func htmlMD(t *testing.T, src string) string {
+	t.Helper()
+	md, err := HTMLToMarkdown(src, "")
+	if err != nil {
+		t.Fatalf("HTMLToMarkdown: %v", err)
+	}
+	return md
+}
+
+// TestHTMLTableWithoutHeaderRow is the defect that cost the html corpus most of
+// its table score: a table whose first row is <td> rather than <th> has no
+// header, and the upstream plugin answered that by emitting no table at all.
+// The first row is promoted instead, which is what GFM requires.
+func TestHTMLTableWithoutHeaderRow(t *testing.T) {
+	got := htmlMD(t, `<table>
+<tr><td>A</td><td>B</td></tr>
+<tr><td>1...</td><td>2...</td></tr>
+</table>`)
+	want := "| A | B |\n| --- | --- |\n| 1... | 2... |"
+	if got != want {
+		t.Errorf("markdown =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestHTMLTableSpansExpandToARectangle covers rowspan and colspan. A spanned
+// cell is mirrored into every position it covers: that keeps the grid
+// rectangular (a ragged pipe table is not a table) and keeps a spanned header
+// label attached to every column it labels.
+func TestHTMLTableSpansExpandToARectangle(t *testing.T) {
+	got := htmlMD(t, `<table>
+<tr><th>H1</th><th colspan="2">H2+3</th></tr>
+<tr><td rowspan="2">R1+2C1</td><td>R1C2</td><td>R1C3</td></tr>
+<tr><td colspan="2">R2C2+3</td></tr>
+<tr><td>R3C1</td><td>R3C2</td><td>R3C3</td></tr>
+</table>`)
+	want := "| H1 | H2+3 | H2+3 |\n" +
+		"| --- | --- | --- |\n" +
+		"| R1+2C1 | R1C2 | R1C3 |\n" +
+		"| R1+2C1 | R2C2+3 | R2C2+3 |\n" +
+		"| R3C1 | R3C2 | R3C3 |"
+	if got != want {
+		t.Errorf("markdown =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestHTMLTableBlockContentInCells: a cell holding paragraphs, a list or a
+// <br> used to break out of the table and land as loose paragraphs after it.
+// A newline anywhere inside a GFM table terminates it, so cell content is
+// flattened to a single line.
+func TestHTMLTableBlockContentInCells(t *testing.T) {
+	got := htmlMD(t, `<table>
+<tr><td>A</td><td>B</td></tr>
+<tr><td>First Line<br>Second Line</td><td><ul><li>one</li><li>two</li></ul></td></tr>
+<tr><td><p>para one</p><p>para two</p></td><td><h3>Heading</h3></td></tr>
+</table>`)
+	want := "| A | B |\n" +
+		"| --- | --- |\n" +
+		"| First Line   Second Line | - one - two |\n" +
+		"| para one    para two | Heading |"
+	if got != want {
+		t.Errorf("markdown =\n%q\nwant\n%q", got, want)
+	}
+	if strings.Contains(got, "\n\n") {
+		t.Errorf("a blank line inside the table splits it in GFM:\n%q", got)
+	}
+}
+
+// TestHTMLTableInlineMarkupInCellsSurvives: the point of rendering cells
+// through the converter rather than taking their text is that a link, emphasis
+// and code inside a cell stay markdown.
+func TestHTMLTableInlineMarkupInCellsSurvives(t *testing.T) {
+	got := htmlMD(t, `<table>
+<thead><tr><th>Name</th><th>Links</th></tr></thead>
+<tbody>
+<tr><td>Formatted</td><td><strong>Bold</strong> and <em>italic</em></td></tr>
+<tr><td>Linked</td><td><p>See <a href="https://example.com/a">Page A</a> now.</p></td></tr>
+<tr><td>Code</td><td><code>inline_fn()</code></td></tr>
+</tbody>
+</table>`)
+	want := "| Name | Links |\n" +
+		"| --- | --- |\n" +
+		"| Formatted | **Bold** and *italic* |\n" +
+		"| Linked | See [Page A](https://example.com/a) now. |\n" +
+		"| Code | `inline_fn()` |"
+	if got != want {
+		t.Errorf("markdown =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestHTMLNestedTableFlattensToText: GFM has no nested tables, so an inner one
+// becomes the text of its cells, space separated. Concatenating the text nodes
+// would weld "A1" and "B1" together, because the whitespace between </td><td>
+// has already been collapsed away by the time the table is rendered.
+func TestHTMLNestedTableFlattensToText(t *testing.T) {
+	got := htmlMD(t, `<table>
+<tr><td>A</td><td>B</td></tr>
+<tr><td><table><tr><td>A1</td><td>B1</td></tr><tr><td>C1</td><td>D1</td></tr></table></td><td>2...</td></tr>
+</table>`)
+	want := "| A | B |\n| --- | --- |\n| A1 B1 C1 D1 | 2... |"
+	if got != want {
+		t.Errorf("markdown =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestHTMLTableCaptionIsKept: docling's ground truth drops <caption>, but a
+// caption is the table's title and dropping it is content loss. It is emitted
+// as the paragraph before the table.
+func TestHTMLTableCaptionIsKept(t *testing.T) {
+	got := htmlMD(t, `<table><caption>Basic duck facts</caption>
+<tr><th>Name</th></tr><tr><td>Mallard</td></tr></table>`)
+	want := "Basic duck facts\n\n| Name |\n| --- |\n| Mallard |"
+	if got != want {
+		t.Errorf("markdown =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestHTMLTableSectionsAreReadInDocumentOrder covers thead/tbody/tfoot, which
+// may appear in any order in the markup and are read in the order written.
+func TestHTMLTableSectionsAreReadInDocumentOrder(t *testing.T) {
+	got := htmlMD(t, `<table>
+<thead><tr><th>H</th></tr></thead>
+<tbody><tr><td>body</td></tr></tbody>
+<tfoot><tr><td>foot</td></tr></tfoot>
+</table>`)
+	want := "| H |\n| --- |\n| body |\n| foot |"
+	if got != want {
+		t.Errorf("markdown =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestHTMLPresentationTableIsNotATable: role="presentation" says the table is
+// page layout, not data. Rendering it as a pipe table would invent structure.
+func TestHTMLPresentationTableIsNotATable(t *testing.T) {
+	got := htmlMD(t, `<table role="presentation"><tr><td><p>left</p></td><td><p>right</p></td></tr></table>`)
+	if strings.Contains(got, "|") {
+		t.Errorf("layout table rendered as a pipe table:\n%q", got)
+	}
+	if !strings.Contains(got, "left") || !strings.Contains(got, "right") {
+		t.Errorf("layout table lost its content:\n%q", got)
+	}
+}
+
+// TestHTMLTableRaggedRowsComeOutRectangular: rows with different cell counts
+// must still produce one valid table.
+func TestHTMLTableRaggedRowsComeOutRectangular(t *testing.T) {
+	got := htmlMD(t, `<table>
+<tr><td>a</td><td>b</td><td>c</td></tr>
+<tr><td>1</td></tr>
+<tr><td>x</td><td>y</td></tr>
+</table>`)
+	want := "| a | b | c |\n| --- | --- | --- |\n| 1 |  |  |\n| x | y |  |"
+	if got != want {
+		t.Errorf("markdown =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestHTMLTablePipeInCellIsEscapedExactlyOnce: the renderer has its own pending
+// escape for "|" and mdutil.EscapeCell adds one too. Emitting both produced
+// "\\|", which renders as a literal backslash followed by a column break.
+func TestHTMLTablePipeInCellIsEscapedExactlyOnce(t *testing.T) {
+	got := htmlMD(t, `<table><tr><th>N</th></tr><tr><td>Gadget|X</td></tr></table>`)
+	want := "| N |\n| --- |\n| Gadget\\|X |"
+	if got != want {
+		t.Errorf("markdown =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestHTMLEmptyTableRendersNothing: an empty <table> must not leave a blank
+// block behind, and must not emit a header-less pipe skeleton.
+func TestHTMLEmptyTableRendersNothing(t *testing.T) {
+	got := htmlMD(t, `<p>before</p><table></table><p>after</p>`)
+	if want := "before\n\nafter"; got != want {
+		t.Errorf("markdown = %q, want %q", got, want)
+	}
+}
+
+// TestHTMLTableHostileSpansAreBounded: rowspan/colspan are attacker-controlled
+// integers that multiply. A 60-byte document must not ask for a billion cells.
+func TestHTMLTableHostileSpansAreBounded(t *testing.T) {
+	got := htmlMD(t, `<table><tr><td colspan="99999999" rowspan="99999999">x</td></tr></table>`)
+	lines := strings.Split(got, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want a header and a separator line, got %d:\n%q", len(lines), got)
+	}
+	if n := strings.Count(lines[0], "|"); n > htmlTableMaxCols+1 {
+		t.Errorf("column count %d exceeds the bound %d", n-1, htmlTableMaxCols)
+	}
+}
+
+// TestHTMLImageAltIsKept: alt text is the only text an image contributes, so
+// it stays — except where a <figcaption> already describes the image.
+func TestHTMLImageAltIsKept(t *testing.T) {
+	got := htmlMD(t, `<img src="example_image_01.png" alt="Example image"/>`)
+	if want := "![Example image](example_image_01.png)"; got != want {
+		t.Errorf("markdown = %q, want %q", got, want)
+	}
+}
+
+// TestHTMLFiguredImageDropsAltInFavourOfTheCaption: emitting both repeats the
+// same description twice in a row.
+func TestHTMLFiguredImageDropsAltInFavourOfTheCaption(t *testing.T) {
+	got := htmlMD(t, `<figure><img src="a.png" alt="A duck"/><figcaption>A duck on a pond.</figcaption></figure>`)
+	if want := "![](a.png)\n\nA duck on a pond."; got != want {
+		t.Errorf("markdown = %q, want %q", got, want)
+	}
+}
+
+// TestHTMLFigureWithoutCaptionKeepsAlt: without a caption there is nothing to
+// duplicate, so the alt is the image's only text and must survive.
+func TestHTMLFigureWithoutCaptionKeepsAlt(t *testing.T) {
+	got := htmlMD(t, `<figure><img src="a.png" alt="A duck"/></figure>`)
+	if want := "![A duck](a.png)"; got != want {
+		t.Errorf("markdown = %q, want %q", got, want)
 	}
 }
