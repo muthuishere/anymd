@@ -1,0 +1,232 @@
+---
+title: Getting started
+description: Install anymd and convert your first document — from the shell or from Go — in under a minute.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem, Steps, Aside, LinkCard, CardGrid, Code } from '@astrojs/starlight/components';
+
+One binary or one `go get`. No cgo, no Python, no native library.
+
+```sh
+anymd report.docx > report.md
+```
+
+## Install
+
+<Tabs syncKey="install">
+<TabItem label="Go toolchain">
+
+```sh
+# the CLI
+go install github.com/muthuishere/anymd/cmd/anymd@latest
+
+# the library
+go get github.com/muthuishere/anymd
+```
+
+Requires Go 1.26. `CGO_ENABLED=0` builds work, and the module cross-compiles
+anywhere Go does:
+
+```sh
+GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build ./...
+```
+
+</TabItem>
+<TabItem label="Install script">
+
+For machines with no Go toolchain. The download is always verified against the
+release's `checksums.txt`; there is no flag to skip that.
+
+```sh
+curl -sSfL https://raw.githubusercontent.com/muthuishere/anymd/main/install.sh | sh
+
+# pin a version, or choose where it lands
+curl -sSfL .../install.sh | VERSION=v0.1.0 sh
+curl -sSfL .../install.sh | PREFIX=$HOME/bin sh
+```
+
+The script never calls `sudo`. If it cannot write to `/usr/local/bin` it falls
+back to a user-writable directory.
+
+</TabItem>
+<TabItem label="From source">
+
+```sh
+git clone https://github.com/muthuishere/anymd && cd anymd
+make build        # stamps the version from `git describe`
+make release      # cross-compiles darwin/linux/windows × amd64/arm64 into dist/
+```
+
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="Homebrew and Scoop are not live yet">
+`brew install` and `scoop install` are wired in `.goreleaser.yaml` but commented
+out until the tap and bucket repositories exist — GoReleaser fails an entire
+release when it cannot push to them, which would publish nothing at all. See
+`packaging/README.md` in the repo for the current status.
+</Aside>
+
+## Your first conversion
+
+<Steps>
+
+1. **Check the binary is on your PATH.**
+
+   ```sh
+   anymd --version
+   # anymd v0.1.0
+   # commit: …
+   # go: go1.26.3
+   ```
+
+2. **Convert a document to stdout.**
+
+   ```sh
+   anymd report.docx
+   ```
+
+   Markdown goes to stdout. The progress line goes to stderr, so the pipe stays
+   clean:
+
+   ```sh
+   anymd contract.pdf | grep -n 'Section 4'
+   ```
+
+3. **Write it to a file.**
+
+   ```sh
+   anymd report.docx -o report.md
+   ```
+
+4. **Convert a whole tree, deterministically.**
+
+   ```sh
+   anymd -r ./contracts -d ./markdown --ext .md
+   # stderr: converted 218, failed 2
+   ```
+
+   Files are converted on a worker pool but emitted in **input order**, so two
+   runs over the same tree produce the same bytes in the same sequence.
+
+5. **Check what your build actually supports.**
+
+   ```sh
+   anymd --list
+   # audio csv docx epub image ipynb msg pdf pptx rss xls xlsx json html zip plaintext
+   ```
+
+   That is the registry in dispatch order — the authoritative answer for the
+   binary you have, ahead of any table on this site.
+
+</Steps>
+
+## CLI and library, side by side
+
+The CLI is a thin shell over the public API. Anything one can do, the other can.
+
+<Tabs syncKey="surface">
+<TabItem label="CLI">
+
+```sh
+anymd report.docx > report.md          # a file
+cat page.html | anymd -t html          # stdin, with a type hint
+anymd https://example.com/report.pdf   # a URL
+anymd -r docs/ -d build/md --ext .md   # a tree, in input order
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/muthuishere/anymd"
+)
+
+func main() {
+	res, err := anymd.ConvertFile("report.docx")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(res.Title)    // "Q3 Report", when the format carries one
+	fmt.Println(res.Markdown) // the GFM body
+}
+```
+
+For bytes you already hold, `anymd.ConvertBytes(b, info)`; for any reader,
+`anymd.Convert(r, info)`.
+
+</TabItem>
+<TabItem label="Python (markitdown)">
+
+The tool anymd is an alternative to, for comparison:
+
+```python
+from markitdown import MarkItDown
+
+md = MarkItDown()
+result = md.convert("report.docx")
+print(result.text_content)
+```
+
+anymd is the same idea with a different set of trade-offs: no interpreter, no
+wheels, no convert-time network calls unless you ask for them.
+
+</TabItem>
+</Tabs>
+
+## What the defaults do not do
+
+The default build extracts what is already text and invents nothing:
+
+- **No OCR.** A scanned PDF returns `ErrNoTextLayer`, not empty output.
+- **No audio transcription.** An audio file is not even accepted.
+- **No image captioning.** Images give dimensions and EXIF, nothing more.
+- **No network at convert time.** A converter cannot fetch a remote asset. The
+  CLI's explicit URL argument is the only fetch, and it happens before any
+  converter sees a byte.
+
+Each of those is a default, not a limit — [`--llm`](/anymd/llm/) turns them on
+per invocation.
+
+## Next
+
+<CardGrid>
+	<LinkCard
+		title="CLI reference"
+		href="/anymd/cli/"
+		description="Every flag, the three contracts, exit codes, and worked pipeline examples."
+	/>
+	<LinkCard
+		title="Go library"
+		href="/anymd/library/"
+		description="Engine, Converter, StreamInfo, Options, Result — and the dispatch model."
+	/>
+	<LinkCard
+		title="Formats"
+		href="/anymd/formats/"
+		description="Per format: what is extracted, what is not, and what --llm adds."
+	/>
+	<LinkCard
+		title="LLM features"
+		href="/anymd/llm/"
+		description="Captioning, scanned PDFs and transcription. Opt-in, and it costs money."
+	/>
+	<LinkCard
+		title="Caching"
+		href="/anymd/cache/"
+		description="Off by default. Where it pays, and where it is a measured net loss."
+	/>
+	<LinkCard
+		title="Benchmarks"
+		href="/anymd/benchmarks/"
+		description="Speed and quality against markitdown, including where anymd loses."
+	/>
+</CardGrid>

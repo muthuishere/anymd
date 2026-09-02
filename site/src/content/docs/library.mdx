@@ -1,0 +1,353 @@
+---
+title: Go library
+description: The anymd Go API — Engine, Converter, StreamInfo, Options, Result — the dispatch model, and the error sentinels.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem, Aside, LinkCard, CardGrid, Code } from '@astrojs/starlight/components';
+
+```sh
+go get github.com/muthuishere/anymd
+```
+
+Three lines to convert a document:
+
+```go
+res, err := anymd.ConvertFile("report.docx")
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(res.Markdown) // and res.Title, when the format carries one
+```
+
+Requires Go 1.26. No cgo anywhere in the dependency graph, so `CGO_ENABLED=0`
+builds work and the module cross-compiles anywhere Go does.
+
+<Aside type="note">
+Every snippet on this page is lifted from `example_test.go`, which `go test`
+compiles and executes with its output asserted. They cannot drift from the API.
+</Aside>
+
+## The core types
+
+| Type | What it is |
+|---|---|
+| `Engine` | A converter registry. `New()` returns one with every built-in registered; the zero `Engine` is empty. |
+| `Converter` | Two methods, `Accepts` and `Convert`. One family of formats. |
+| `StreamInfo` | Hints about a stream: `MimeType`, `Extension`, `Charset`, `FileName`, `URL`. Every field optional. |
+| `Options` | Per-conversion knobs. A nil `*Options` and the zero value both give the defaults. |
+| `Result` | `Markdown string` and `Title string`. `Result.String()` returns the body, so it prints directly. |
+
+### Package-level helpers
+
+Each uses `Default()`, the shared engine built on first use:
+
+```go
+func Convert(r io.Reader, info StreamInfo) (Result, error)
+func ConvertBytes(b []byte, info StreamInfo) (Result, error)
+func ConvertFile(path string) (Result, error)
+func Default() *Engine
+```
+
+`Default` is a function rather than a variable on purpose. Go initializes
+package-level variables **before** it runs `init()`, and every converter
+registers itself from an `init()`. A `var Default = New()` would capture an
+empty registry and make every helper return `ErrUnsupported`.
+
+### Engine methods
+
+```go
+func New() *Engine
+func (e *Engine) Register(c Converter)
+func (e *Engine) Converters() []string
+func (e *Engine) ConvertStream(r io.Reader, info StreamInfo, opts *Options) (Result, error)
+func (e *Engine) ConvertBytes(b []byte, info StreamInfo, opts *Options) (Result, error)
+func (e *Engine) ConvertFile(path string, opts *Options) (Result, error)
+```
+
+`ConvertStream` buffers a plain `io.Reader` into memory first, because dispatch
+has to rewind. Hand it an `io.ReadSeeker` (an `*os.File`, a `*bytes.Reader`) to
+avoid that copy.
+
+Once built, an `Engine` is safe for concurrent use. `Register` is the mutation,
+so finish registering before you start converting.
+
+## Three ways in
+
+<Tabs>
+<TabItem label="A reader">
+
+```go
+doc := strings.NewReader(`
+	<html><head><title>Quarterly Notes</title></head><body>
+	<h1>Quarterly Notes</h1>
+	<p>Revenue is <b>up</b>.</p>
+	<ul><li>EMEA</li><li>APAC</li></ul>
+	</body></html>`)
+
+res, err := anymd.Convert(doc, anymd.StreamInfo{Extension: ".html"})
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println("title:", res.Title)
+fmt.Println(res.Markdown)
+// title: Quarterly Notes
+// # Quarterly Notes
+//
+// Revenue is **up**.
+//
+// - EMEA
+// - APAC
+```
+
+</TabItem>
+<TabItem label="Bytes">
+
+```go
+csv := []byte("region,seats,renewed\nEMEA,120,yes\nAPAC,64,no\n")
+
+res, err := anymd.ConvertBytes(csv, anymd.StreamInfo{Extension: ".csv"})
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Print(res.Markdown)
+// | region | seats | renewed |
+// | --- | --- | --- |
+// | EMEA | 120 | yes |
+// | APAC | 64 | no |
+```
+
+</TabItem>
+<TabItem label="A file">
+
+```go
+res, err := anymd.ConvertFile(path)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Print(res.Markdown)
+```
+
+The path seeds the extension, filename and MIME hints, so no `StreamInfo` is
+needed.
+
+</TabItem>
+</Tabs>
+
+### StreamInfo helpers
+
+```go
+info := anymd.StreamInfoForFile("/data/q3.PDF")
+info.Ext()                       // ".pdf" — lowercased, leading dot guaranteed
+info.NormalizedMime()            // mime type, lowercased, ";" parameters stripped
+info.HasExt(".pdf", ".ps")       // extension hint matches one of these
+info.HasMimePrefix("image/")     // normalized mime starts with a prefix
+info.CopyAndUpdate(other)        // copy with every non-empty field of other applied
+```
+
+## Options
+
+| Field | Default | Effect |
+|---|---|---|
+| `MaxDepth int` | `0` → 8 | Bounds container recursion. Negative disables recursion entirely. |
+| `KeepDataURIs bool` | `false` | Keeps base64 image payloads inline as `data:` URIs instead of dropping them. |
+| `Charset string` | detected | Overrides the detected encoding for text-ish formats. |
+| `Cache Cache` | `nil` | Serves and stores conversions content-addressed. See [Cache](/anymd/cache/). |
+| `Describer Describer` | `nil` | Captions images and reads pages with no text layer. See [LLM](/anymd/llm/). |
+| `Transcriber Transcriber` | `nil` | Converts audio to text. Without one, audio formats are not accepted at all. |
+| `LLMTimeout time.Duration` | `0` → 60s | Bounds a single `Describer` or `Transcriber` call. |
+
+Nil is the interesting default. With `Describer` and `Transcriber` both nil —
+what the zero `Options` gives you — a conversion makes no network calls of any
+kind. That is the property that makes it safe to point at untrusted input.
+
+## The dispatch model
+
+Dispatch is deliberately simple, because predictability is the feature.
+
+1. **Hints first.** `StreamInfo` carries the extension, MIME type and filename
+   you already know.
+2. **Then sniffing.** If the MIME hint is empty, the engine reads the first 512
+   bytes and fills it in with `http.DetectContentType`. Individual converters
+   sniff their own magic bytes inside `Accepts`.
+3. **Priority order.** Converters are tried in ascending priority, ties broken
+   by registration order.
+4. **First `Accepts` wins.** No scoring, no voting, no second opinion.
+
+| Constant | Value | For |
+|---|---|---|
+| `PrioritySpecific` | 0 | An unambiguous magic number or unique extension: docx, pdf, xlsx. The default for a converter that implements no `Prioritized`. |
+| `PriorityGeneric` | 10 | A broad family that would otherwise shadow a specific format: html, zip-as-container. |
+| `PriorityFallback` | 100 | The single last-resort text converter. Exactly one converter should sit here. |
+
+The two methods have very different budgets. `Accepts` runs against **every**
+registered converter on **every** conversion, so it must stay cheap: hints and
+magic bytes, never a full parse. It may read from `r` freely and need not
+rewind — the engine seeks back to 0 before every `Accepts` and before `Convert`.
+
+### Accepting and then failing is a hard error
+
+If a converter accepts a stream and its `Convert` returns an error, the engine
+returns that error. It does **not** fall through to the next candidate.
+
+That is a design choice, not an oversight. Falling through means a corrupt
+`.docx` quietly comes back as the plaintext converter's rendering of compressed
+XML — which looks like output, diffs like output, and is garbage. An error the
+caller can see beats plausible nonsense they cannot. The failure mode this
+project exists to avoid is a pipeline that indexes rubbish and reports success.
+
+```go
+_, err := e.ConvertBytes([]byte("BEGIN:VCARD\nEND:VCARD\n"),
+	anymd.StreamInfo{Extension: ".vcf"}, nil)
+fmt.Println("err:", err)
+// err: anymd: vcard: vcard has no FN (formatted name) property
+```
+
+The error is wrapped with the converter's name, so you always know which one
+claimed the stream.
+
+### Inspecting the registry
+
+`Engine.Converters()` returns the live registry in dispatch order — always the
+authoritative answer for the build you have:
+
+```go
+names := anymd.New().Converters()
+
+fmt.Println("last:", names[len(names)-1])
+fmt.Println("has csv:", slices.Contains(names, "csv"))
+fmt.Println("has pdf:", slices.Contains(names, "pdf"))
+// last: plaintext
+// has csv: true
+// has pdf: true
+```
+
+The invariant worth relying on is the last line: the text catch-all sits alone
+at `PriorityFallback`, so it is always last.
+
+## Errors
+
+| Sentinel | Meaning |
+|---|---|
+| `ErrUnsupported` | Nothing claimed the stream. The concrete value is an `*UnsupportedError`. |
+| `ErrNoTextLayer` | A PDF parsed cleanly but carries no text layer at all — a scan. |
+| `ErrEncryptedPDF` | A PDF is encrypted and would not open with an empty password. |
+| `ErrMaxDepth` | A container hit `Options.MaxDepth`. |
+| `ErrParseTimeout` | An underlying parser exceeded its time budget. |
+
+### The typed unsupported error
+
+Use the sentinel for a quick branch and the typed error for the detail worth
+logging:
+
+```go
+// Binary bytes with a NUL, so even the text fallback declines.
+blob := []byte{0x00, 0x01, 0x02, 0x03, 0xff, 0xfe}
+
+_, err := anymd.ConvertBytes(blob, anymd.StreamInfo{Extension: ".widget"})
+
+fmt.Println("unsupported:", errors.Is(err, anymd.ErrUnsupported))
+
+var ue *anymd.UnsupportedError
+if errors.As(err, &ue) {
+	fmt.Println("ext:", ue.Ext)
+	fmt.Println("mime:", ue.Mime)
+	fmt.Println("declined some:", len(ue.Declined) > 0)
+}
+// unsupported: true
+// ext: .widget
+// mime: application/octet-stream
+// declined some: true
+```
+
+`Declined` names every converter that looked at the stream and passed. It is
+deliberately **not** part of `Error()`: a container converter such as zip embeds
+a member's error text into the Markdown it produces, and a reader should not
+find the converter registry printed inside their document.
+
+### Why a scanned PDF is an error
+
+```go
+_, err := anymd.ConvertBytes(scan, anymd.StreamInfo{Extension: ".pdf"})
+
+fmt.Println("no text layer:", errors.Is(err, anymd.ErrNoTextLayer))
+// no text layer: true
+```
+
+A pure scan — every page a single raster image — could be reported as a
+successful conversion producing `""`. It is not, because `""` is exactly what a
+genuinely blank document produces, and the caller would have no way to tell them
+apart.
+
+The distinction is operationally load-bearing. "There is nothing to extract"
+ends the job. "The text is locked inside images" is a signal to route the file
+to an OCR step, or to supply a `Describer`. Same reasoning for
+`ErrEncryptedPDF`: an encrypted file must never be mistaken for an empty one.
+
+## Containers and recursion
+
+Container converters — zip, epub, msg — recurse through `Options.Recurse`, never
+by constructing a fresh `Engine`. `Recurse` carries the same engine and options
+down and increments the depth counter, which is what makes `MaxDepth` real
+rather than advisory.
+
+```go
+func (o *Options) Recurse(r io.ReadSeeker, info StreamInfo) (Result, error)
+func (o *Options) Depth() int
+```
+
+Past the limit, `Recurse` returns `ErrMaxDepth`. A container reports that inline
+against the offending member and keeps walking its siblings — losing a whole
+archive because one member nested too far would be the wrong trade:
+
+```go
+// A zip containing a zip containing note.txt.
+shallow, _ := e.ConvertBytes(outer, anymd.StreamInfo{Extension: ".zip"},
+	&anymd.Options{MaxDepth: 1})
+fmt.Print(shallow.Markdown)
+// ## inner.zip
+//
+// ## note.txt
+//
+// *[could not convert: anymd: max recursion depth exceeded]*
+
+deep, _ := e.ConvertBytes(outer, anymd.StreamInfo{Extension: ".zip"},
+	&anymd.Options{MaxDepth: 2})
+fmt.Print(deep.Markdown)
+// ## inner.zip
+//
+// ## note.txt
+//
+// hello from the inside
+```
+
+## Safety posture
+
+Every converter is a parser aimed at bytes someone else chose, so:
+
+- **Never panics.** Malformed input is an error. Lengths, indices and offsets
+  read out of a document are treated as attacker-controlled, and a dependency
+  that reports corruption by panicking is wrapped in a `recover`.
+- **Allocations are bounded.** Per-format input caps, cell and glyph caps, and
+  zip-bomb limits (per-entry, archive-wide, and entry-count). A declared
+  uncompressed size is never trusted to size a buffer.
+- **Recursion is bounded centrally** by `Options.MaxDepth` via `Options.Recurse`.
+- **No network, no subprocess, no shell** at convert time. The exceptions are
+  both things you asked for: the CLI's explicit URL argument, resolved before
+  any converter sees a byte, and a `Describer` or `Transcriber` you supplied.
+- **No cgo**, so there is no memory-unsafe parser in the dependency graph.
+
+Archive member names that try to escape the root — absolute paths, drive
+letters, `..` components — are refused rather than repeated into output.
+
+A `Describer` failure is deliberately not an error for the document: a model
+outage or a rate limit costs you the caption, not the conversion. A
+`Transcriber` failure **is** an error, because the transcript is the audio
+file's entire content.
+
+<CardGrid>
+	<LinkCard title="Extending it" href="/anymd/extending/" description="Write your own Converter, Cache or Describer and register it." />
+	<LinkCard title="Formats" href="/anymd/formats/" description="What each built-in converter extracts, and what it does not." />
+	<LinkCard title="API reference" href="https://pkg.go.dev/github.com/muthuishere/anymd" description="Every exported symbol on pkg.go.dev." />
+</CardGrid>

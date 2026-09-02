@@ -165,7 +165,7 @@
 //	Excel (legacy BIFF)    .xls .xlt .xlm .xlw             same output as .xlsx
 //	Word                   .docx                           headings, lists, tables, links, title
 //	PDF                    .pdf                            text layer, column-aware order (scans need a Describer)
-//	HTML                   .html .htm .xhtml               headings, lists, tables, links, code
+//	HTML                   .html .htm .xhtml .xht               headings, lists, tables, links, code
 //	Feeds                  .rss .atom .xml .rdf            feed and entry titles, dates, summaries
 //	JSON                   .json                           pretty-printed, fenced
 //	Notebooks              .ipynb                          markdown cells, code cells, text outputs
@@ -173,6 +173,7 @@
 //	PowerPoint             .pptx                           slide text, tables, charts, notes
 //	Images                 .jpg .jpeg .png .gif .webp .tiff .bmp   dimensions and EXIF only
 //	Outlook mail           .msg                            subject, header table, body
+//	Audio                  .mp3 .m4a .wav .flac .ogg .webm  (needs an Options.Transcriber)
 //	ZIP                    .zip                            each member converted, bounded by MaxDepth
 //
 // Anything with no matching converter that still decodes as UTF-8 text falls

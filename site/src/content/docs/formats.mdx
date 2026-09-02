@@ -1,0 +1,376 @@
+---
+title: Formats
+description: Every format anymd converts — extensions, what is extracted, what is not, and what --llm adds.
+sidebar:
+  order: 4
+---
+
+import { Aside, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+What each converter accepts, what it extracts, what it leaves behind, and which
+`--llm` flag changes that.
+
+<Aside type="tip">
+`anymd --list` prints the registry in dispatch order for the build you have.
+That is always the authoritative answer, ahead of this page.
+</Aside>
+
+## The matrix
+
+| Format | Extensions | With `--llm` |
+|---|---|---|
+| Word | `.docx` | captions embedded images |
+| PowerPoint | `.pptx` | captions embedded images |
+| Excel | `.xlsx` `.xlsm` `.xltx` `.xltm` | — |
+| Excel (legacy) | `.xls` `.xlt` `.xlm` `.xlw` | — |
+| PDF | `.pdf` | reads pages with no text layer |
+| HTML | `.html` `.htm` `.xhtml` `.xht` | — |
+| EPUB | `.epub` | — |
+| Feeds | `.rss` `.atom` `.xml` `.rdf` | — |
+| Outlook mail | `.msg` | — |
+| ZIP | `.zip` | whatever the members support |
+| Notebooks | `.ipynb` | — |
+| JSON | `.json` | — |
+| CSV / TSV | `.csv` `.tsv` `.tab` | — |
+| Images | `.jpg` `.jpeg` `.png` `.gif` `.webp` `.tiff` `.tif` `.bmp` | captions the image |
+| Audio | `.mp3` `.m4a` `.wav` `.flac` `.ogg` `.oga` `.opus` `.webm` `.mp4` `.mpga` `.mpeg` `.mpg` | **required** (`--llm-transcribe`) |
+| Plain text | `.txt` `.text` `.md` `.markdown` `.log` | — |
+
+## How a converter is chosen
+
+Dispatch is hints first, then magic bytes. A stream carries a `StreamInfo` — the
+extension and MIME type, filled in from the file path, from a URL's
+`Content-Type`, or from `-t`. When there is no MIME hint, the first 512 bytes
+are sniffed to supply one.
+
+Each registered converter is asked `Accepts` in priority order and **the first
+one that accepts wins**. Priority has three bands: specific (a unique magic
+number or extension), generic (a broad claim such as "it is markup" or "it is a
+zip"), and one fallback (plain text). Ties break by registration order.
+
+A converter that accepts and then fails is a **hard error** — the engine does
+not fall through to a catch-all that would emit plausible-looking garbage. That
+is why converters sharing a magic number decline aggressively. `.xls`, `.msg`,
+legacy `.doc` and `.ppt` are all the same OLE2 compound-file magic, so the `xls`
+converter requires a top-level `Workbook`/`Book` stream and refuses anything
+carrying the MAPI `__substg1.0_` marker, which makes it provably disjoint from
+`msg`. The same applies to the zip family: `docx`, `pptx`, `xlsx` and `epub` get
+first refusal before the generic zip converter.
+
+When nothing accepts, the result is `ErrUnsupported` — an `*UnsupportedError`
+naming every converter that looked and declined. Binary input with no converter
+is an error, never silent garbage.
+
+## Word — `.docx`
+
+**Accepted from:** the `.docx` extension, the WordprocessingML MIME type, or a
+zip central directory containing `word/document.xml`.
+
+**Extracted:** headings, paragraphs, ordered and unordered lists, tables,
+hyperlinks, image alt text, text boxes (`w:txbxContent`, both DrawingML and
+legacy VML), DrawingML canvas text, embedded charts, and the `dc:title` core
+property as `Result.Title`. Content controls (`w:sdt`) are transparent, so their
+content is walked like any other block. Single-cell wrapper tables are unwrapped
+rather than emitted as a one-cell table. A list inside a text box inside a table
+cell still comes out as a list, because all four block containers are walked
+through one function.
+
+**Not extracted:** comments and tracked changes. Text-box nesting is bounded —
+real documents never exceed two levels — and content deeper than the bound is
+dropped rather than followed.
+
+**With `--llm`:** embedded images are captioned, with the author's own alt text
+passed to the model as a hint. An image inside a table keeps its alt text and
+costs no model call: a caption cannot go into a GFM cell without breaking the
+row.
+
+## PowerPoint — `.pptx`
+
+**Accepted from:** the `.pptx` extension, the PresentationML MIME type, or a zip
+entry `ppt/presentation.xml`.
+
+**Extracted:** every slide in presentation order as `## Slide n`, then its shape
+text in shape order, tables, charts and speaker notes. A title placeholder
+becomes an H3. Charts are followed through the slide relationships into the
+chart part and rendered as their title plus the category × series grid from the
+producer's cached values. Speaker notes render as a blockquote. Slide parts are
+sorted numerically, so slide 10 does not land between slide 1 and slide 2, and
+slides are numbered by position, so a deleted slide leaves no gap.
+
+**Not extracted:** animations, themes, layout geometry. A chart with no cached
+values degrades to its title alone — the live data lives in an embedded
+workbook. An `r:link` picture pointing outside the package is ignored; only
+`r:embed` is read.
+
+**With `--llm`:** embedded images are captioned, the caption following the image
+as its own paragraph. One captioner serves the whole deck, so a logo on all 60
+slides costs one model call.
+
+## Excel — `.xlsx` `.xlsm` `.xltx` `.xltm`
+
+**Accepted from:** those extensions, the workbook MIME types, or zip magic plus
+an `xl/workbook.xml` entry. Other office containers are declined outright so
+their own converters win.
+
+**Extracted:** every visible, non-empty sheet in workbook order under an
+`## SheetName` heading. **A sheet is not one table.** It is split into
+4-connected regions of non-empty cells, and each region becomes its own table
+with its own header row — so a title block, a revision block and a data grid
+beside a legend stay three tables instead of being welded into one. Merged cells
+repeat their anchor's text across the span; section labels lift to prose. Values
+render as displayed, not as stored: dates come out as dates rather than serial
+numbers, and a formula cell emits its cached result. Charts anchored on a sheet
+contribute their title, type and cached series data. Cell comments — both legacy
+and threaded — are appended after the sheet's tables. Chart sheets are included.
+
+**Not extracted:** hidden sheets (a hidden sheet is not part of the document a
+reader sees), an entirely empty sheet (no bare heading is emitted), macros,
+pivot tables, and images. Trailing empty rows and columns are trimmed, so a
+stray formatted cell far out in the grid does not inflate the table. Cell counts
+and the declared merge list are capped, because both come straight out of the
+file.
+
+## Excel, legacy — `.xls` `.xlt` `.xlm` `.xlw`
+
+**Accepted from:** those extensions, or — on a bare stream — the OLE2
+compound-file magic **plus** a positively confirmed top-level `Workbook` (BIFF8)
+or `Book` (BIFF5/7) stream. It declines `.msg`, `.doc`, `.dot`, `.ppt`, `.pot`
+and `.pps` however the stream is sniffed, and declines anything carrying the
+MAPI marker.
+
+**Extracted:** the same output shape as `.xlsx` — same heading level, same
+trailing-blank trimming, same cell cap, same split into one table per
+4-connected region — so a reader cannot tell which of the two Excel formats a
+document came from.
+
+**Not extracted:** formula **results**, which the BIFF reader returns as a
+placeholder; Excel's own date formats, which are not applied; and merged-cell
+records, which the parser does not expose, so a legacy sheet's merges do not
+join regions the way an `.xlsx`'s do.
+
+## PDF — `.pdf`
+
+**Accepted from:** the `%PDF-` magic first — the only signal a wrong filename
+cannot fake — then the MIME and extension hints, so a mislabelled or truncated
+PDF still reaches the converter and produces a real error instead of being
+swallowed by the plain-text fallback.
+
+**Extracted:** the text layer, page by page, with pages separated by a `---`
+rule rather than a heading (a page number is pagination, not document structure,
+and a heading would corrupt the outline). Reading order is a recursive XY-cut
+over line boxes: a region wide enough is checked for a column gutter, split, and
+recursed, so a two-column page is read column by column instead of interleaved
+line by line. The fast path is conservative — when no column structure is found,
+a single-column page renders through the same code as before.
+
+**Not extracted:** tables (no PDF table detection — the largest known gap on the
+[quality benchmark](/anymd/benchmarks/#where-anymd-still-loses)), headings, form
+fields, and figures. The glyph count laid out per document is capped, so a
+crafted content stream cannot make layout unbounded.
+
+**Errors, not empty output:** a PDF that parses cleanly but carries no text
+layer at all — the pure-scan document — returns the named `ErrNoTextLayer`, so a
+caller can tell "nothing to extract" from "extraction failed" and route the file
+to OCR. An encrypted PDF that will not open with an empty password returns
+`ErrEncryptedPDF` for the same reason.
+
+**With `--llm`:** a page with no text has its embedded image XObjects lifted out
+of the object graph and read by a vision model; identical images are described
+once per document and the caption reused. No rasterization is involved — there
+is no pure-Go PDF renderer, and a cgo one would end the single-binary promise.
+See [the recorded limits](#recorded-limits) for which image encodings that path
+can and cannot read.
+
+## HTML — `.html` `.htm` `.xhtml` `.xht`
+
+**Accepted from:** those extensions, `text/html` or `application/xhtml+xml`, or
+a sniff of a real HTML opener in the head of the stream. It deliberately does
+not claim `.xml`: a bare XML document belongs to a feed, an OPF or an office
+part.
+
+**Extracted:** headings, lists, tables, links, code, and the `<title>`.
+Character encoding is detected and decoded, or forced with `--charset`. Tables
+go through a grid walker that renders every table through the shared GFM table
+writer — including tables with no `<th>` and tables with block content in a
+cell. This is the shared HTML path, so EPUB, feeds and `.msg` bodies get the
+same rendering.
+
+**Not extracted:** scripts, styles, remote assets, and anything that requires
+JavaScript execution — the page renders as whatever is in the source. Input is
+bounded, because HTML is parsed whole.
+
+## EPUB — `.epub`
+
+**Accepted from:** the extension, the EPUB media type, or the self-identifying
+stored `mimetype` entry the spec requires at the front of the archive — a
+128-byte read, so a bare unnamed stream is recognized without unzipping
+anything.
+
+**Extracted:** the spine in reading order, each XHTML part converted through the
+shared HTML path, plus the metadata title. Implemented on `archive/zip` and
+`encoding/xml`, with no EPUB library.
+
+**Not extracted:** cover art, footnote back-links. DRM'd books are refused.
+
+## Feeds — `.rss` `.atom` `.xml` `.rdf`
+
+**Accepted from:** a plausible hint (one of those extensions, or a feed/XML MIME
+type) **and** a sniff confirming a feed root element — `<rss`, `<feed` or
+`<rdf:RDF`. Both are required, so a plain `.xml` file that is not a feed falls
+through to whoever really owns it instead of being claimed and then hard-failing.
+
+**Extracted:** the feed title as the H1, then each entry as an H2 with its date
+and author line, its link, and its summary or content converted through the HTML
+path. Dates are normalized to RFC3339 in UTC, so two feeds that disagree about
+date format still produce comparable output.
+
+**Not extracted:** the full article behind a link — fetching it would be a
+network call, which converters do not make.
+
+## Outlook mail — `.msg`
+
+**Accepted from:** the OLE2 compound-file magic plus either the `.msg` extension
+or, on a bare stream, a bounded scan for the UTF-16LE `__substg1.0_`
+directory-entry marker that only a MAPI message carries. The magic alone is not
+enough: it is byte-for-byte the magic of legacy `.doc`, `.xls` and `.ppt`.
+
+**Extracted:** the subject, a From/To/Cc/Date table (FILETIME timestamps
+normalized), and the body — the HTML body converted through the HTML path, or
+the plain body.
+
+**Not extracted:** attachments, RTF-compressed bodies, and recipient storages.
+Only top-level streams are read; nested storages are where attachments live.
+
+## ZIP — `.zip`
+
+**Accepted from:** zip magic plus a central-directory read confirming that no
+more specific converter owns the archive — that is, it holds none of
+`word/document.xml`, `ppt/presentation.xml`, `xl/workbook.xml`, and is not an
+EPUB. Reading the central directory is a bounded tail read; nothing is
+decompressed at accept time except an EPUB's ~20-byte `mimetype` entry. A
+truncated or corrupt archive is claimed only when the hints say zip, so the
+caller gets a real parse error rather than a bare `ErrUnsupported`.
+
+**Extracted:** every member in stored order, each under an H2 and converted
+recursively through the same engine. Recursion goes through `Options.Recurse`,
+which is what makes `--max-depth` (default 8) real — a container converter never
+builds its own engine. A member that fails to convert is reported inline and the
+walk continues: losing 99 good files because the 100th was corrupt would be the
+wrong trade. Being too deep is reported the same way, as a fact about that
+member.
+
+**Not extracted:** encrypted archives are refused. An archive is capped at
+10,000 entries and 512 MiB decompressed across the whole walk.
+
+## Notebooks — `.ipynb`
+
+**Accepted from:** the extension or `application/x-ipynb+json`, or a cheap sniff
+— a JSON opening brace plus an `"nbformat"` key in the head. It is asked before
+the JSON converter, which sits one step behind it and declines `.ipynb`
+outright.
+
+**Extracted:** markdown cells as prose, code cells fenced in the kernel's
+language, and textual outputs fenced beneath them — `stream` text and the
+`text/plain` representation.
+
+**Not extracted:** `display_data` (rendered plots and images), any binary MIME
+type, and widget state. A page of base64 is noise to every consumer of the
+Markdown.
+
+## JSON — `.json`
+
+**Accepted from:** the bytes actually being JSON — the first non-space byte must
+open an object or an array, and a stream short enough to read whole must parse.
+The `.json` extension alone is not enough, because it is frequently wrong and a
+mis-claim is a hard error.
+
+**Extracted:** the document as a fenced, re-indented code block — except for the
+common "exported records" shape, a top-level array of flat objects, which
+becomes a GFM table.
+
+**Not extracted:** schema inference, semantic flattening of nested structures.
+
+## CSV and TSV — `.csv` `.tsv` `.tab`
+
+**Accepted from:** the extension and MIME hints only. Sniffing text for commas
+would steal prose from the plain-text fallback.
+
+**Extracted:** one GFM table with the first row as the header. The delimiter is
+sniffed from comma, tab, semicolon and pipe. Real-world exports are ragged, so
+no field count is enforced: a short row is padded and the header widened to the
+widest row, rather than truncating data away.
+
+**Not extracted:** cell types — everything is text.
+
+## Images — `.jpg` `.jpeg` `.png` `.gif` `.webp` `.tiff` `.tif` `.bmp`
+
+**Accepted from:** magic bytes first, then an `image/` MIME prefix, then the
+extension.
+
+**Extracted:** pixel dimensions, and a fixed table of EXIF fields in a fixed
+order so the same photo always renders byte-identically — capture time, make,
+model, lens, f-number, exposure time, ISO, focal length, GPS latitude and
+longitude, image description, artist, copyright. That metadata is genuine,
+verifiable text, and is often the only part of an image a retrieval index can
+match on.
+
+**Not extracted:** the pixels are never described in the default build.
+Dimensions come from the standard library's header decoders, so GIF, JPEG and
+PNG report them and anything else (WebP, TIFF, BMP) degrades to "no dimensions"
+rather than pulling in another dependency.
+
+**With `--llm`:** a prose caption alongside the dimensions and EXIF.
+
+## Audio — `--llm-transcribe` only
+
+Extensions: `.mp3` `.m4a` `.wav` `.flac` `.ogg` `.oga` `.opus` `.webm` `.mp4`
+`.mpga` `.mpeg` `.mpg` — the set the common speech endpoints accept. Magic bytes
+are recognized too, so an extensionless zip member or mail attachment still
+routes here.
+
+The audio converter **declines in `Accepts`** unless a transcriber is
+configured. That is deliberate: accepting an `.mp3` with no transcriber would
+replace the honest `ErrUnsupported` with a misleading "audio converter failed",
+and would break the promise that a default conversion makes no network calls.
+
+**With `--llm --llm-transcribe`:** the spoken content, one model call per file.
+A transcription failure is a hard error — the transcript *is* the document, and
+an empty success would be exactly the silent-nothing behaviour this project
+criticises elsewhere.
+
+**Not extracted:** speaker diarization, timestamps.
+
+## Plain text — `.txt` `.text` `.md` `.markdown` `.log`
+
+The last-resort converter, at fallback priority, so it can never shadow a real
+format. It accepts a `text/` MIME prefix or those extensions; with no usable
+hint it accepts only if the head decodes as UTF-8 with no NUL bytes, so binary
+is never emitted as "markdown". Content passes through verbatim, with CRLF
+normalized to LF.
+
+## Recorded limits
+
+<Aside type="caution" title="Scanned PDF images the --llm path cannot read">
+`DCTDecode` (the overwhelmingly common scan encoding) passes through as JPEG and
+`JPXDecode` as JPEG 2000; 8-bit `FlateDecode` (or unfiltered) DeviceRGB/DeviceGray
+is re-encoded to PNG. Everything else is skipped silently rather than guessed at:
+**`CCITTFaxDecode` — which is most pre-2005 office scanning** — plus JBIG2Decode,
+LZWDecode, RunLengthDecode, indexed and CMYK colorspaces, and any bit depth other
+than 8. A skipped image is not an error; the page simply produces no caption.
+</Aside>
+
+The rest, in one list:
+
+- **Legacy `.xls` formula results are a placeholder**, a limit of the BIFF
+  reader, and Excel's own date formats are not applied.
+- **PDF tables, headings, figures and form fields are not reconstructed** —
+  only the text layer is extracted, in column-aware reading order.
+- **HTML that requires JavaScript** renders as whatever is in the source.
+- **Encrypted zips and DRM'd EPUBs are refused.**
+- **`.msg` attachments, RTF-compressed bodies and recipient storages** are
+  skipped.
+
+<CardGrid>
+	<LinkCard title="LLM features" href="/anymd/llm/" description="What --llm adds per format, what it costs, and the built-in guards." />
+	<LinkCard title="Benchmarks" href="/anymd/benchmarks/" description="Measured fidelity per format against docling's ground truth." />
+</CardGrid>

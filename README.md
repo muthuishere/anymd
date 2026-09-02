@@ -151,7 +151,7 @@ not point it at the public internet.
 | Excel (legacy) | `.xls` `.xlt` `.xlm` `.xlw` | same output as `.xlsx`, byte-identical on the same workbook | formula results (the BIFF reader returns a placeholder), Excel's own date formats |
 | Word | `.docx` | headings, paragraphs, lists, tables, links, image alt text, core-properties title; embedded image captions with `--llm` | comments, tracked changes |
 | PDF | `.pdf` | text layer, page by page, in column-aware reading order; with `--llm`, pages with no text layer are read by a vision model | tables, headings, figures, form fields |
-| HTML | `.html` `.htm` `.xhtml` | headings, lists, tables, links, code, `<title>` | scripts, styles, anything requiring JS execution, remote assets |
+| HTML | `.html` `.htm` `.xhtml` `.xht` | headings, lists, tables, links, code, `<title>` | scripts, styles, anything requiring JS execution, remote assets |
 | Feeds | `.rss` `.atom` `.xml` `.rdf` | channel/feed title, per-entry title, date, link, summary | full-article fetch (that would be a network call) |
 | JSON | `.json` | pretty-printed, fenced as a code block | schema inference, semantic flattening |
 | Notebooks | `.ipynb` | markdown cells, code cells as fenced blocks, text outputs | rendered plots and images, widget state |

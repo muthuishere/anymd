@@ -1,0 +1,342 @@
+---
+title: CLI reference
+description: Every anymd flag and subcommand, the stdout/stderr contract, the exit codes, and worked pipeline examples.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem, Aside, Steps, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+```
+anymd [flags] [file|url ...]
+anymd config <path|show|init> [--llm-config FILE]
+anymd cache  <path|stats|clean> [--cache-dir DIR]
+```
+
+With no arguments — or the conventional `-` — anymd reads stdin. With a single
+input and neither `-o` nor `-d`, it writes to stdout.
+
+## The three contracts
+
+Everything else on this page is detail. These three are what you script against.
+
+### 1. stdout is Markdown, stderr is diagnostics
+
+Progress lines, warnings and errors never touch stdout, on any code path. The
+output of a run is exactly the document and nothing else.
+
+```sh
+# stdout carries only the document; the progress line goes to the terminal
+anymd contract.pdf | grep -n 'Section 4'
+
+# keep the Markdown, discard the chatter
+anymd report.docx 2>/dev/null > report.md
+
+# keep the chatter, discard the Markdown (a validity check)
+anymd -r inbox/ -d /dev/null 2>errors.log
+```
+
+A short write to stdout is a failure, not a success: `anymd big.pdf | head`
+exits non-zero rather than reporting that it converted a document it truncated.
+Use `-q` to silence per-file progress when you only want real errors on stderr.
+
+### 2. Exit codes 0, 1, 2
+
+| Code | Meaning |
+|---|---|
+| `0` | Every input converted. |
+| `1` | One or more inputs failed — an unreadable file, a scanned PDF with no text layer, an unsupported type, an HTTP error. |
+| `2` | Usage error: unknown flag, `-o FILE` with several inputs, `-o` together with `-d`, an `--llm-*` flag without `--llm`, `--cache-dir` without `--cache`. |
+
+`1` means the document was bad. `2` means the invocation was bad. Those want
+different responses in CI, which is the whole reason they are separate.
+
+```sh
+anymd -r ./corpus -d ./out
+case $? in
+  0) echo "all converted" ;;
+  1) echo "some documents failed; see the log" ; exit 1 ;;
+  2) echo "bad invocation — fix the script" ; exit 2 ;;
+esac
+```
+
+### 3. Batch output is emitted in input order
+
+Inputs are converted on a worker pool sized to `runtime.NumCPU()` (capped at the
+number of inputs), but results are emitted in **input order**, never completion
+order. Deterministic and diffable beats marginally faster.
+
+A run's stdout and its file-writing sequence are identical every time, on any
+machine. Convert a corpus twice and compare; commit the output and see only real
+changes in the next diff. anymd's own regression suite works this way.
+
+A multi-input run ends with a stderr summary: `converted 12, failed 1`. With
+`--fail-fast`, the first failure cancels the remaining jobs and reporting stops
+there.
+
+## Flags
+
+| Flag | Argument | Default | What it does |
+|---|---|---|---|
+| `-o`, `--output` | FILE \| DIR | — | Write to FILE. If the path already exists **as a directory**, batch into it. |
+| `-d`, `--outdir` | DIR | — | Batch output directory, created if missing. Mutually exclusive with `-o`. |
+| `--ext` | .md | `.md` | Output extension in batch mode. A leading dot is added if omitted. |
+| `-t`, `--type` | EXT | — | Force an extension hint, e.g. `-t docx`. Mainly for stdin, which has no filename. |
+| `-r`, `--recursive` | — | off | Walk directories given as inputs. Without it, a directory argument is an error. |
+| `--charset` | NAME | detected | Override the detected text encoding. |
+| `--max-depth` | N | `8` | Bound container recursion — a zip inside a zip inside a zip. |
+| `--keep-data-uris` | — | off | Keep base64 images inline as `data:` URIs rather than dropping them. |
+| `--title` | — | off | Prepend `# Title` when the converter found one and the body does not already open with an h1. |
+| `-q`, `--quiet` | — | off | Suppress the per-file progress lines on stderr. Errors still print. |
+| `--fail-fast` | — | off | Stop at the first error. The default is to continue and report at the end. |
+| `--insecure` | — | off | Skip TLS verification when fetching a URL. |
+| `--list` | — | — | Print the registered converters in dispatch order, then exit 0. |
+| `--version` | — | — | Print version, commit and Go version, then exit 0. |
+
+### Cache flags
+
+Off by default — anymd writes nothing to your disk unasked. Detail on the
+[cache page](/anymd/cache/).
+
+| Flag | Argument | Default | What it does |
+|---|---|---|---|
+| `--cache` | — | off | Reuse a previous conversion of identical bytes. |
+| `--no-cache` | — | off | Force a fresh conversion. Wins over `--cache`, with a note on stderr. |
+| `--cache-dir` | DIR | `os.UserCacheDir()/anymd` | Cache location. Requires `--cache`; on its own it is a usage error, not a silent no-op. |
+
+<Aside type="caution" title="The cache is a net loss on cheap formats">
+Measured on this repo: a disk hit is ~435 µs against ~126 µs to simply convert
+the document again on the plaintext converter. Turn it on for pdf/docx-class
+work, for a corpus you re-process, and above all for `--llm` runs. See
+[when the cache pays](/anymd/cache/#when-the-cache-actually-pays).
+</Aside>
+
+### LLM flags
+
+All off by default. Without `--llm`, anymd makes no network calls during
+conversion at all. Each of these is a usage error without `--llm`, so a typo
+cannot silently do nothing.
+
+| Flag | Argument | Default | What it does |
+|---|---|---|---|
+| `--llm` | — | off | Enable LLM image captioning — one model call per image. |
+| `--llm-config` | FILE | `~/.config/anymd/anymdconfig.json` | Config file location. |
+| `--llm-model` | NAME | from config | Override the vision model. |
+| `--llm-base-url` | URL | provider default | Override the endpoint. A local Ollama or vLLM works. |
+| `--llm-timeout` | D | `60s` | Bound one model call, e.g. `30s`. Must be positive. |
+| `--llm-transcribe` | — | off | Also transcribe audio — one call per file. |
+| `--llm-transcribe-model` | M | `whisper-1` | Speech model. A different endpoint from `--llm-model`, hence its own flag. |
+
+Precedence is **explicit flag > config file > environment > default**. The API
+key is read from the environment (`OPENROUTER_API_KEY`, `OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY`), or from the config file via `${VAR}` interpolation. anymd
+never prints a key, not even masked.
+
+<Aside type="danger" title="--llm costs money and sends content to a third party">
+One model call per captioned image, one per transcribed file. A deck with 40
+distinct figures is 40 calls; a directory of 200 such decks is several thousand.
+The image bytes out of your document — and, on a scanned PDF, the page itself —
+are uploaded to whatever endpoint `base_url` names. If that is not acceptable
+for a given document, do not pass the flag; the default sends nothing anywhere.
+Pointing `--llm-base-url` at a local Ollama or vLLM keeps the bytes on the
+machine. Full detail on the [LLM page](/anymd/llm/).
+</Aside>
+
+## Input modes
+
+<Tabs>
+<TabItem label="stdin">
+
+No arguments, or a single `-`. There is no filename to sniff, so pass a hint
+with `-t` when the bytes are ambiguous.
+
+```sh
+cat page.html | anymd -t html
+curl -s https://example.com/a.docx | anymd -t docx > a.md
+gunzip -c sales.xlsx.gz | anymd -t xlsx
+```
+
+</TabItem>
+<TabItem label="A single file">
+
+Written to stdout unless `-o` or `-d` says otherwise.
+
+```sh
+anymd report.docx            # to stdout
+anymd report.docx -o out.md  # to a file
+```
+
+If the `-o` path already exists **as a directory**, anymd batches into it rather
+than trying to create a file with that name. `-o FILE` with more than one input
+is a usage error — use `-d`.
+
+</TabItem>
+<TabItem label="A directory">
+
+```sh
+anymd -r ./contracts -d ./markdown --ext .md
+```
+
+Directory arguments are walked only with `-r`. Symlinks are skipped, and the
+walk result is sorted, so the input list is the same on every run and on every
+machine. The output name is the input's basename with its extension replaced by
+`--ext`; two inputs sharing a basename do not clobber each other, the second
+becomes `report-1.md`, the third `report-2.md`.
+
+</TabItem>
+<TabItem label="A URL">
+
+```sh
+anymd https://example.com/report.pdf > report.md
+anymd https://example.com/a.pdf https://example.com/b.pdf -d ./out
+```
+
+An `http://` or `https://` argument is fetched rather than opened. Type hints
+come from the response `Content-Type` and from the final, post-redirect URL —
+the URL's own extension wins when it has one. The output basename is derived
+from the URL path, falling back to the host, then to `download`. Fetches use a
+30-second timeout and a real `User-Agent`; a non-2xx response is an error, not
+an empty document.
+
+</TabItem>
+</Tabs>
+
+## Network access
+
+A URL argument is **the only network access the CLI makes**, unless you pass
+`--llm`. Converters are offline by construction: they see a plain byte stream
+and have no client to reach out with. A malicious document cannot make anymd
+phone home.
+
+<Aside type="danger" title="--insecure disables TLS verification">
+No certificate chain check and no hostname check. Any machine on the path can
+present its own certificate and read or rewrite the document you are converting.
+It exists for self-signed internal hosts. Do not point it at the public
+internet, and do not put it in a script that later gets used against one.
+</Aside>
+
+## The `config` subcommand
+
+```sh
+anymd config path   # print the config file path
+anymd config show   # print the resolved config, every secret redacted
+anymd config init   # write a starter config (mode 0600); never overwrites
+```
+
+`--llm-config FILE` is accepted on either side of the verb and overrides the
+default path.
+
+`show` never prints a secret — not in full, not truncated, not masked. A masked
+key still leaks its length and its prefix, and it teaches people that showing
+part of a key is acceptable. It prints one of three descriptions instead:
+
+| Situation | What you see |
+|---|---|
+| Field empty, an env var is set | `<unset in config; will use $OPENROUTER_API_KEY from the environment>` |
+| Field is `${VAR}` | `<set from ${VAR}>`, or `<references ${VAR}, which is NOT set>` |
+| Field holds a literal | `<set literally in the file — move it to ${VAR} and keep it out of the file>` |
+
+The guarantee is structural, not a filter: `show` parses the **raw** file rather
+than the resolved config, so the key's value is never loaded into a variable a
+later careless edit could print. A `proxy` URL is parsed and any embedded
+userinfo becomes `<redacted>`; every custom header value goes through the
+identical redaction as `api_key`, because a header is just as likely to be a
+token.
+
+`init` writes mode `0600` with `O_EXCL`, so it cannot clobber a config written a
+moment earlier.
+
+## The `cache` subcommand
+
+```sh
+anymd cache path    # print the cache directory (never creates it)
+anymd cache stats   # entry count, total size, budget, version key
+anymd cache clean   # delete every cached entry
+```
+
+`--cache-dir DIR` is accepted on either side of the verb. Caching is off unless
+you pass `--cache` to a conversion.
+
+```
+$ anymd cache stats
+cache dir:   /Users/you/Library/Caches/anymd
+entries:     1
+size:        244 B
+budget:      256.0 MiB
+version key: v0.1.1-0.20260902132823-8196e256f0d7+dirty
+hit rate:    n/a (per-process; this run made no lookups)
+```
+
+Because the key covers the anymd version, an upgrade invalidates every entry on
+its own — `clean` is for reclaiming disk space, not for correctness.
+
+## Worked examples
+
+### Feed a RAG pipeline, branching on the exit code
+
+```bash title="ingest.sh"
+#!/usr/bin/env bash
+set -uo pipefail
+# One document per file, deterministic order, titles preserved for chunk headers.
+anymd -r ./corpus -d ./chunks --ext .md --title -q 2> ingest.err
+status=$?
+
+# 2 means the command line is wrong; ingesting anything would be a mistake.
+[ "$status" -eq 2 ] && { cat ingest.err; exit 2; }
+
+for f in ./chunks/*.md; do embed "$f"; done
+
+# 1 means some documents were bad; the rest are ingested, review the log.
+[ "$status" -eq 1 ] && echo "skipped $(grep -c '^anymd:' ingest.err) documents" >&2
+exit 0
+```
+
+Add `--cache` when the same corpus is re-ingested. Add `--llm` only if you want
+image captions and accept the network calls and the cost.
+
+### Route scans to OCR instead of indexing nothing
+
+anymd returns a named error for a PDF with no text layer rather than an empty
+success, so a pipeline can tell the two apart:
+
+```bash
+if ! anymd "$f" > "$out" 2> "$err"; then
+  if grep -q 'no text layer' "$err"; then
+    ocr_queue "$f"          # the text is locked inside pixels
+  else
+    echo "failed: $f" >&2   # something else went wrong
+  fi
+fi
+```
+
+### Other one-liners
+
+```sh
+# pipe a file
+cat notes.docx | anymd -t docx | less
+
+# batch a folder
+anymd -r ./contracts -d ./markdown --ext .md
+# stderr: converted 218, failed 2
+
+# a validity sweep — throw the Markdown away, keep the errors
+anymd -r inbox/ -d /dev/null 2>errors.log
+```
+
+## Registered converters
+
+`anymd --list` prints them in dispatch order — the order they are offered the
+stream, first match wins:
+
+```
+audio  csv  docx  epub  image  ipynb  msg  pdf  pptx
+rss  xls  xlsx  json  html  zip  plaintext
+```
+
+`plaintext` is last because it is the fallback that accepts anything that
+decodes as text.
+
+<CardGrid>
+	<LinkCard title="Formats" href="/anymd/formats/" description="What each of those converters extracts, and what it does not." />
+	<LinkCard title="LLM features" href="/anymd/llm/" description="What --llm turns on, what it costs, and the guards." />
+</CardGrid>

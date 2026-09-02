@@ -21,3 +21,8 @@ cover.out
 *.swp
 .idea/
 .vscode/
+
+# Docs site (Astro + Starlight)
+site/node_modules/
+site/dist/
+site/.astro/

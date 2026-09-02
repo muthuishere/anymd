@@ -1,0 +1,403 @@
+---
+title: LLM features
+description: Image captioning, scanned-PDF reading and audio transcription — opt-in, and the only thing that makes a conversion touch the network.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem, Aside, Steps, LinkCard, CardGrid, FileTree } from '@astrojs/starlight/components';
+
+Two fields on `Options`, both interfaces, both `nil` by default:
+
+```go
+type Describer interface {
+	Describe(ctx context.Context, img []byte, mime, hint string) (string, error)
+}
+
+type Transcriber interface {
+	Transcribe(ctx context.Context, audio []byte, mime string) (string, error)
+}
+```
+
+This is markitdown's `llm_client=` parameter expressed as an interface rather
+than a concrete SDK object. Anything that can look at bytes and return text
+satisfies it: a hosted API, a local model, or a stub in your tests.
+
+With both nil — the zero `Options`, and what you get if you never read this page
+— anymd makes no network calls of any kind during conversion. That guarantee is
+what lets you point it at untrusted documents.
+
+<Aside type="danger" title="Turning this on costs money and sends content to a third party">
+One model call per captioned image. One per transcribed file. A deck with 40
+distinct figures is 40 calls, and a directory of 200 such decks is several
+thousand. The images out of your document — and, on a scanned PDF, the page
+itself — are uploaded to whatever endpoint `base_url` names. `--llm` is
+per-invocation for exactly this reason: there is no environment variable that
+turns it on globally.
+</Aside>
+
+## Side by side
+
+<Tabs syncKey="surface">
+<TabItem label="CLI">
+
+```sh
+# caption every image in a deck
+anymd --llm deck.pptx
+
+# read a scanned PDF
+anymd --llm scan.pdf
+
+# transcribe an interview — a separate endpoint and a separate charge
+anymd --llm --llm-transcribe interview.m4a
+
+# a local model: no key leaves the box, no per-call cost
+anymd --llm --llm-base-url http://localhost:11434/v1 --llm-model llava photo.jpg
+```
+
+</TabItem>
+<TabItem label="Go">
+
+```go
+d := llm.New(llm.Config{Model: "gpt-4o"})
+
+res, err := anymd.Default().ConvertFile("document_with_images.pdf",
+	&anymd.Options{Describer: d})
+```
+
+</TabItem>
+<TabItem label="Python (markitdown)">
+
+```python
+from markitdown import MarkItDown
+from openai import OpenAI
+
+md = MarkItDown(llm_client=OpenAI(), llm_model="gpt-4o")
+result = md.convert("document_with_images.pdf")
+print(result.text_content)
+```
+
+</TabItem>
+</Tabs>
+
+The flags are on the [CLI page](/anymd/cli/#llm-flags). Every one of them except
+`--llm` itself is a usage error without `--llm`. A flag that silently did
+nothing — `--llm-model` above all, whose absence looks like the model was
+applied — is worse than a refusal.
+
+## What it unlocks
+
+### Scanned PDFs, without rasterization
+
+A scanned PDF has no text layer at all: every page is one large embedded image
+XObject. anymd cannot rasterize a page — there is no pure-Go PDF renderer, and a
+cgo one (pdfium, MuPDF) would break the package's central promise.
+
+It does not have to. The pixels the scanner produced are already sitting in the
+file as a JPEG, so the image is lifted straight out of the object graph and
+handed to your `Describer`. No rendering step, no native dependency, and the
+constraint that looked fatal turns out not to bind.
+
+Filters keep this honest. An image under 4096 bytes, or under 64 pixels on a
+side, is a logo, a rule or a signature stamp rather than a page scan, and is
+skipped. With no `Describer`, not a byte of this code runs and a text-free PDF
+still returns `ErrNoTextLayer` exactly as before.
+
+<Aside type="caution" title="Which scan encodings this path can read">
+`DCTDecode` (the usual scan encoding) passes through as JPEG, `JPXDecode` as
+JPEG 2000, and 8-bit Flate/unfiltered DeviceRGB or DeviceGray is re-encoded to
+PNG. **`CCITTFaxDecode` — most pre-2005 office scanning** — plus JBIG2, LZW,
+RunLength, indexed and CMYK colorspaces, and any bit depth other than 8, are
+skipped silently rather than guessed at. A skipped image is not an error; the
+page simply produces no caption.
+</Aside>
+
+### Embedded images in docx and pptx
+
+Word and PowerPoint reference their pictures through relationship ids. Without a
+`Describer`, anymd emits the placeholder and whatever alt text the author wrote
+— that is all a pure-Go parse can honestly say. With one, the media part is read
+and captioned, and **the author's own alt text is passed to the model as the
+hint**:
+
+```go
+text += "\n\nThe document labels this image: " + hint
+```
+
+The author already told you what the picture is. Discarding that and asking a
+model to guess from scratch is strictly worse.
+
+Vector parts (EMF, WMF, SVG) are excluded: no hosted vision model accepts them,
+so sending one is a wasted call.
+
+### Standalone images
+
+A `.jpg` or `.png` normally converts to its pixel dimensions and EXIF metadata.
+With a `Describer`, a caption is added. Without one, the pixels are never
+described.
+
+### Audio
+
+The audio converter is **inert** until you supply a `Transcriber`: its `Accepts`
+returns false when `Options.Transcriber` is nil. An accepted `.mp3` with nothing
+to read it would replace an honest "unsupported" error with an empty document.
+
+Unlike a caption, a failed transcription is a hard error, because the transcript
+is the file's entire content. An empty transcript is a failure, not a successful
+conversion of silence.
+
+## Setting up a key
+
+<Steps>
+
+1. **Write the config file.**
+
+   ```sh
+   anymd config init     # mode 0600, never overwrites
+   anymd config path     # where it landed
+   ```
+
+2. **Point it at a provider, with the key as a `${VAR}` reference.**
+
+   ```json title="~/.config/anymd/anymdconfig.json"
+   {
+     "model":      "openai/gpt-4o-mini",
+     "base_url":   "https://openrouter.ai/api/v1",
+     "api_key":    "${OPENROUTER_API_KEY}",
+     "retries":    2,
+     "timeout_ms": 60000
+   }
+   ```
+
+3. **Export the variable in your shell.** The key never enters the file.
+
+   ```sh
+   export OPENROUTER_API_KEY=…
+   ```
+
+4. **Check what resolved, without printing the key.**
+
+   ```sh
+   anymd config show
+   # api_key: <set from ${OPENROUTER_API_KEY}>
+   ```
+
+5. **Convert one document before you convert a corpus.**
+
+   ```sh
+   anymd --llm one-deck.pptx | head -40
+   ```
+
+</Steps>
+
+## The config file
+
+```
+$XDG_CONFIG_HOME/anymd/anymdconfig.json    # when XDG_CONFIG_HOME is set
+~/.config/anymd/anymdconfig.json           # otherwise, on every platform
+```
+
+That path is `~/.config/` on **every** platform including macOS: this
+deliberately does not use `os.UserConfigDir()`, which resolves to
+`~/Library/Application Support` there. A CLI's config belongs where a developer
+expects to find and edit it.
+
+Every field:
+
+```json
+{
+  "model":      "openai/gpt-4o-mini",
+  "base_url":   "https://openrouter.ai/api/v1",
+  "api_key":    "${LLM_API_KEY}",
+  "proxy":      "${HTTPS_PROXY}",
+  "headers":    { "HTTP-Referer": "${SITE_URL}" },
+  "retries":    2,
+  "timeout_ms": 60000,
+  "anthropic":  false,
+  "insecure_skip_verify": false
+}
+```
+
+A missing file is **not** an error: it yields the zero config, so anymd works
+from environment variables alone and the file is purely optional.
+
+### `${VAR}` interpolation, and why an unset one is fatal
+
+Every string field supports `${VAR}` interpolation from the environment. That is
+how a key stays out of the file.
+
+An unset or empty variable is an **error**, not an empty string. Silently
+expanding a missing key to `""` would send an unauthenticated request and
+surface as a confusing 401 from the provider, three layers away from the cause.
+The error names the field and the variable:
+
+```
+llm: api_key references unset environment variable(s): LLM_API_KEY (in /home/you/.config/anymd/anymdconfig.json)
+```
+
+Errors name the **variable**, never its value. Nothing in this package prints an
+API key, not even masked — not in an error, not in `config show`, not in a
+failed-request body, which is truncated and never echoes the `Authorization`
+header.
+
+<Aside type="danger" title="insecure_skip_verify">
+Disables TLS verification, for a self-signed corporate proxy. It makes the
+connection interceptable; do not point it at the public internet.
+</Aside>
+
+## The `llm` package
+
+`github.com/muthuishere/anymd/llm` is the ready-made implementation of both
+interfaces. Vision goes through
+[toolnexus](https://github.com/muthuishere/toolnexus), which handles API keys,
+retries, backoff and the OpenAI-vs-Anthropic wire difference; this package is
+the vision message and the glue.
+
+```go
+func New(cfg Config) *Client
+func FromConfigFile(path string) (*Client, error)
+func FromClient(c *tn.Client, prompt string) *Client
+func NewTranscriber(cfg Config, model string) *Transcriber
+func TranscriberFromConfigFile(path, model string) (*Transcriber, error)
+func Load(path string) (Config, error)
+func ConfigPath() (string, error)
+```
+
+The one-liner for the common case:
+
+```go
+d, err := llm.FromConfigFile("") // "" = the default location
+if err != nil {
+	log.Fatal(err)
+}
+res, err := anymd.Default().ConvertFile("deck.pptx", &anymd.Options{Describer: d})
+```
+
+Both at once:
+
+```go
+cfg, err := llm.Load("")
+if err != nil {
+	log.Fatal(err)
+}
+opts := &anymd.Options{
+	Describer:   llm.New(cfg),
+	Transcriber: llm.NewTranscriber(cfg, ""), // "" = whisper-1
+	LLMTimeout:  30 * time.Second,
+}
+```
+
+`FromClient` is the escape hatch: wrap a toolnexus client you built yourself — a
+bespoke transport, a shared client across your app, metrics hooks — and anymd
+adds nothing to your configuration except the vision message.
+
+### `Config`
+
+| Field | Default | Notes |
+|---|---|---|
+| `Model string` | `openai/gpt-4o-mini` | The vision model. Captioning runs once per image, so the default is chosen to keep a 50-figure document affordable. |
+| `BaseURL string` | toolnexus's default | Overrides the provider endpoint. |
+| `APIKey string` | from the environment | Read from `OPENROUTER_API_KEY`, `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` when empty. Prefer leaving it empty: a key in a struct tends to end up in a log or a commit. |
+| `Anthropic bool` | `false` | Switches to Anthropic's wire format instead of OpenAI's. |
+| `Prompt string` | `DefaultPrompt` | Asks for prose, not a list, because the result is spliced into a Markdown document. |
+| `Retries int` | toolnexus's default | On 429, 5xx and network errors. |
+| `TimeoutMs int` | 60000 | Bounds one description. |
+| `HTTPClient *http.Client` | default client | Route through a corporate proxy, pin a CA, set your own timeouts. The default still honors `HTTP_PROXY`/`HTTPS_PROXY`. |
+| `Headers map[string]string` | none | Added to every request: a gateway's auth header, an OpenRouter `HTTP-Referer`, a tenant id. |
+
+The wire format is OpenAI-compatible, so OpenRouter, Ollama, vLLM, LM Studio and
+Azure all work by setting `base_url`. Nothing else needs to change.
+
+## Cost, privacy and the guards
+
+Two things are true at once and both matter.
+
+**It costs money, per call.** One model call per captioned image. One per
+transcribed file. Transcription is billed on a different endpoint from
+captioning, which is why `--llm-transcribe` is a separate flag rather than being
+bundled into `--llm` — bundling would charge people for something they did not
+ask for.
+
+**It sends document content to a third party.** If that is not acceptable for a
+given document, do not pass the flag — and note that the default, with no flag,
+sends nothing anywhere. Pointing `base_url` at a local Ollama or vLLM keeps the
+bytes on your machine.
+
+The guards that are built in:
+
+| Guard | Value | Why |
+|---|---|---|
+| sha256 dedup | per document | The same logo on 60 slides is one call, not 60. Failures are cached too, so a refused image is not retried 59 times. Deduplicated repeats do not count against the cap. |
+| Size floor | 4 KiB | Below that an embedded image is furniture: a spacer, a bullet glyph, a rule, a 1×1 tracking pixel. |
+| Captions per document | 50 | A 300-slide deck must not silently fire 300 requests. Past the cap, every further image degrades to its alt text, exactly as if no Describer had been supplied. |
+| Scanned pages per PDF | 20 | A 500-page scan must not turn one `Convert` into 500 requests. Past the cap anymd stops and says so in the output. |
+| Per-call timeout | 60s | `Options.LLMTimeout` / `--llm-timeout`. A slow model must not stall a whole document. |
+| Audio upload limit | 25 MiB | The documented limit of the hosted endpoint. Refusing above it turns a slow upload ending in a 413 into an immediate, readable error. |
+
+A `Describer` failure is not an error for the document. A model outage or a rate
+limit costs you the caption; the placeholder, dimensions and EXIF are still
+correct, and the rest of the text still converts.
+
+Caching conversions on disk also caches the captions, so a re-run of the same
+document costs nothing. That is where the [cache](/anymd/cache/) pays best.
+
+## The transcription trap
+
+<Aside type="caution" title="OpenRouter does not implement /audio/transcriptions">
+`NewTranscriber` posts a multipart upload to `<base_url>/audio/transcriptions`.
+If your config file points `base_url` at OpenRouter — which the example config
+does, because it is a good default for **vision** — transcription will fail
+against it. Override it for that run.
+</Aside>
+
+```sh
+anymd --llm --llm-transcribe \
+      --llm-base-url http://127.0.0.1:8080/v1 \
+      interview.mp3
+```
+
+The default when `BaseURL` is empty is `https://api.openai.com/v1`, precisely
+because there is no sensible aggregator default for an OpenAI-shaped endpoint.
+Point it at the hosted OpenAI API, a local whisper.cpp server, faster-whisper,
+or LM Studio.
+
+A local endpoint (`localhost`, `127.0.0.1`, `::1`, `0.0.0.0`) is allowed through
+with no API key, since a local whisper server needs no credential; anything
+remote must be authenticated deliberately and returns `ErrNoAPIKey` otherwise.
+Transcription reads `OPENAI_API_KEY`, `OPENROUTER_API_KEY` or `LLM_API_KEY`.
+
+Transcription deliberately does not go through toolnexus. toolnexus drives chat
+completions — a JSON body of messages — and transcription is a multipart upload
+of a raw audio file. It is plain `net/http` plus `mime/multipart` from the
+standard library, and adds no dependency.
+
+The default speech model is `whisper-1`: every OpenAI-compatible server that
+implements `/audio/transcriptions` answers to that name. It is a constructor
+argument rather than a `Config` field because `Config.Model` carries the
+**vision** model, and reusing it would send `gpt-4o-mini` to a transcription
+endpoint.
+
+## Bringing your own model
+
+You do not need the `llm` package. Any function satisfies the interface:
+
+```go
+d := anymd.DescriberFunc(func(ctx context.Context, img []byte, mime, hint string) (string, error) {
+	// call your own model, your own gateway, or return a canned string in a test
+	return "a bar chart of quarterly revenue", nil
+})
+
+res, err := anymd.Default().ConvertFile("deck.pptx", &anymd.Options{Describer: d})
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(res.Markdown)
+```
+
+Implementations must respect `ctx`, must not panic, and should return an error
+rather than a partial description when the request fails.
+
+<CardGrid>
+	<LinkCard title="Caching" href="/anymd/cache/" description="Where an LLM conversion is cached, and why it pays most there." />
+	<LinkCard title="Extending it" href="/anymd/extending/" description="Plug in your own Converter, Cache or Describer." />
+</CardGrid>

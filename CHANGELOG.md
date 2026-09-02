@@ -151,7 +151,7 @@ Initial release. Any document → Markdown, in pure Go: one static binary and on
   `URL`) plus magic-byte sniffing, in priority order, first `Accepts` wins.
   A converter that accepts and then fails is a hard error — the engine does not
   fall through to a catch-all that would emit plausible-looking garbage.
-- **15 converters** (the live list is always `anymd --list`):
+- **16 converters** (the live list is always `anymd --list`):
 
   | converter | extensions | extracts |
   |---|---|---|

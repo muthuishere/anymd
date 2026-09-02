@@ -1,0 +1,312 @@
+---
+title: Caching
+description: anymd's content-addressed conversion cache — off by default, keyed on more than the input bytes, and a measured net loss on cheap formats.
+sidebar:
+  order: 6
+---
+
+import { Tabs, TabItem, Aside, FileTree, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Converting the same document twice repeats all of the work. The cache stores the
+resulting Markdown under a hash of everything that could change it, so the
+second conversion is a lookup.
+
+It is **off by default**. A library and a CLI must not start writing to a user's
+disk because they were run, and for a one-shot conversion the cache is pure
+cost: you pay the hash and store an entry for a document you will never convert
+again.
+
+<Aside type="caution" title="Read the performance note before turning this on">
+Measured on this repo: a **disk hit is roughly 3× slower than simply converting
+the document again** on the cheapest converter — 434,987 ns against 126,397 ns.
+On trivial formats the disk cache is a net loss. It pays on pdf/docx-class work,
+and above all on [LLM conversions](#when-the-cache-actually-pays).
+</Aside>
+
+## Turning it on
+
+<Tabs syncKey="surface">
+<TabItem label="CLI">
+
+```sh
+anymd --cache -r ./corpus -d ./out
+anymd --cache --cache-dir /var/cache/anymd report.pdf
+```
+
+`--cache` to turn it on, `--cache-dir DIR` to move it, `--no-cache` to force a
+fresh conversion.
+
+`--cache-dir` without `--cache` is a usage error (exit 2), not a silently
+ignored argument. `--cache` and `--no-cache` together is *not* an error — a
+wrapper script that always passes `--cache` plus a user who typed `--no-cache`
+is a sensible thing to happen, and the safe reading of "do and do not cache" is
+do not. anymd notes the override on stderr and proceeds.
+
+</TabItem>
+<TabItem label="Go">
+
+```go
+c, err := anymd.NewDiskCache("", 0) // "" = default dir, 0 = 256 MiB budget
+if err != nil {
+	return err
+}
+res, err := anymd.ConvertFile("report.pdf", &anymd.Options{Cache: c})
+```
+
+Or wrap an engine:
+
+```go
+eng := anymd.NewCachedEngine(anymd.New(), c) // a nil c is legal and disables caching
+```
+
+</TabItem>
+</Tabs>
+
+## The key, which is the important part
+
+The key is SHA-256 over a canonical, length-prefixed encoding of everything that
+can change the output — not just the input bytes:
+
+| Component | Why it is in the key |
+|---|---|
+| The input bytes | The obvious part, and the only part a naive cache uses. |
+| **The anymd version** | New code produces different Markdown from the same bytes. See [below](#why-the-version-is-in-the-key). |
+| The converter registry digest | SHA-256 over the converter names in dispatch order. Dispatch is a pure function of (bytes, hints, options, registry), so this *determines* which converter runs. Register a custom converter and you get a disjoint key space — correct, because the same bytes now convert differently. |
+| The `StreamInfo` hints | Extension, MIME type, charset, filename, URL. They steer dispatch: a `.txt` hint and an `.html` hint on the same bytes produce different documents. |
+| Output-affecting options | The remaining recursion budget, `KeepDataURIs`, `Charset`. |
+| Whether a Describer or Transcriber is attached | An LLM-captioned conversion is a different document from an uncaptioned one, and confusing the two is the most user-visible way this cache could lie. |
+
+Every field is written as a tag byte, its length as a big-endian `uint64`, then
+its bytes. The length prefixing is what stops `("ab","c")` and `("a","bc")`
+hashing alike — a concatenation-based key would let a crafted filename push
+content across a field boundary and collide with a different document.
+
+The recursion component is the **remaining** budget, not `MaxDepth`. At depth 2
+of an 8-deep budget the output is whatever six more levels produce, which is
+exactly what a top-level conversion with `MaxDepth: 6` produces — so those share
+an entry. `-1` stays a distinct sentinel meaning "recursion disabled", separate
+from `0` meaning "no levels left".
+
+**Not in the key:** `LLMTimeout`, and the Describer's *identity*. A Describer
+makes conversion non-deterministic in the first place; caching an LLM-captioned
+result caches one sampling of that model's output. That is usually what you want
+— it is why you are caching — but it is a choice, and two different Describers
+share a key. Use separate cache directories if that matters to you.
+
+### Why the version is in the key
+
+The repo's own example. Commit `c53cfbf` fixed `mdutil.Table` emitting a blank
+line between rows. That changed the output bytes of **every table-bearing
+document in every format** — docx, xlsx, html, pdf, csv.
+
+A content-only cache would have gone on serving the broken Markdown after the
+upgrade, with no way for a user to work out why the fix "did not take". They
+would have had a correct binary producing incorrect output, and nothing in the
+system would have pointed at the cache.
+
+With the version in the key, the upgrade changes every key. Every old entry
+becomes unreachable, and the first conversion after an upgrade is a miss that
+writes the corrected output. **So `cache clean` is never needed for correctness
+— only for disk space.**
+
+### How the version is resolved
+
+1. The anymd module's version from the importing program's build info
+   (`bi.Deps` — a consumer's `bi.Main` is *their* module, not ours).
+2. `bi.Main.Version` when anymd itself is the main module, built from a tagged
+   download.
+3. The VCS stamps Go embeds inside a git checkout: `vcs.revision`, plus
+   `+dirty` when the tree was modified.
+4. The constant `buildVersion`, `"dev"` unless a release build sets it with
+   `-ldflags`.
+
+<Aside type="caution" title="The weakness is step 4">
+A build with VCS stamping off — `-buildvcs=false`, a source tarball with no
+`.git`, `go test` in some setups — yields the constant `"dev"` for every build.
+While developing anymd itself, the cache can then serve output produced by code
+you have since changed. Step 3 narrows that to "same commit, dirty tree": the
+working-tree edit itself is invisible to the key. The remedies are `--no-cache`
+while iterating and `anymd cache clean`.
+</Aside>
+
+`anymd cache stats` prints the version key currently in effect, so you can see
+which of the four steps you landed on.
+
+## Error caching
+
+Some failures are worth remembering. Proving that a 200-page scan has no text
+layer costs 50 ms or more, and the answer can never change for the same bytes.
+
+So a `Cache` may also implement the optional `ErrorCache` interface — but only a
+**deterministic allowlist** is ever stored:
+
+| Error | Cached? | Why |
+|---|---|---|
+| `ErrNoTextLayer` | yes | Deterministic for these bytes; expensive to rediscover. The motivating case. |
+| `ErrUnsupported` | yes | Deterministic for these bytes and this registry — and the registry is already in the key. |
+| `ErrParseTimeout` | no | Environmental. A timeout on a loaded machine would be cached as a permanent property of the document. |
+| `ErrMaxDepth` | no | Environmental. The caller may raise the budget on the next run. |
+| I/O errors, everything else | no | Denied by construction — this is an allowlist, not a denylist. |
+
+The rule is exported as `anymd.CacheableError(err) bool`, so the policy is
+visible and testable rather than buried in a type switch, and so anyone writing
+their own `Cache` can apply exactly the same rule. It denies first: an error
+that somehow wrapped both an allowlisted sentinel and a timeout is not cached.
+
+A cached error is not a `Get` hit. The caller asked for a `Result`, and handing
+back the zero `Result` would turn a remembered failure into an empty document.
+
+## The interfaces
+
+`Cache` is two methods over a string key, so an implementation can be a map, a
+directory, Redis, S3 or a CDN without anymd knowing.
+
+```go
+type Cache interface {
+	Get(key string) (Result, bool)
+	Put(key string, res Result)
+}
+
+// Optional. Separate from Cache so a remote or third-party cache can opt out
+// with no ceremony, and so Cache stays the two-method shape callers expect.
+type ErrorCache interface {
+	GetErr(key string) (error, bool)
+	PutErr(key string, err error)
+}
+```
+
+Two requirements:
+
+- A `Cache` **must be safe for concurrent use** — the CLI converts on a worker
+  pool.
+- `Put` is **fire-and-forget**. A cache that cannot store an entry must drop it
+  silently rather than fail a conversion that already succeeded.
+
+### Built-in implementations
+
+| Constructor | Bounds | Notes |
+|---|---|---|
+| `NewMemoryCache(max int)` | `max` entries; `DefaultMemoryEntries` = 256 when `max <= 0` | Concurrency-safe LRU. Bounds *entries*, not bytes: a `Result` is a string, and byte accounting would make the common case — a process converting a few hundred documents — pay for bookkeeping it does not need. |
+| `NewDiskCache(dir string, maxBytes int64)` | `maxBytes`; `DefaultCacheBytes` = 256 MiB when `<= 0` | A directory, shared safely between processes. Empty `dir` means `DefaultCacheDir()`. Implements `ErrorCache`. |
+
+### Where the disk cache lives
+
+`DefaultCacheDir()` returns `os.UserCacheDir()/anymd` — `~/Library/Caches/anymd`
+on macOS, `~/.cache/anymd` on Linux. Entries are sharded two levels deep by key
+prefix:
+
+<FileTree>
+- ~/Library/Caches/anymd/
+  - ab/
+    - cd/
+      - abcd…9f.json
+      - abcd…21.json
+  - ef/
+    - 01/
+      - ef01…7c.json
+</FileTree>
+
+That keeps any one directory to a few hundred files at 100k entries instead of
+100k in one directory — a shape that makes ext4 and APFS lookups slow and `ls`
+unusable.
+
+Deliberately **not** `~/.config/anymd`, where the LLM config lives. A cache is
+regenerable data; putting it in the config directory means a user who backs up
+or syncs their dotfiles carries hundreds of megabytes of derived Markdown with
+them. The XDG split exists for exactly this distinction.
+
+### Why the disk cache is careful
+
+A cache that is *wrong* is worse than no cache. The key is stored **inside**
+each entry and verified on read: a filename is not evidence. A partially written
+file finished by an unrelated crash, a directory copied between machines, or an
+astronomically unlikely SHA-256 collision would all present as a valid path, and
+verifying the key inside the payload makes every one of those a miss rather than
+a wrong answer. An entry with an unrecognised on-disk schema is likewise a miss,
+so an old cache directory is silently ignored rather than misread. Writes are
+atomic, so a crash mid-write leaves the cache exactly as it was.
+
+## Cache commands
+
+```sh
+anymd cache path    # print the cache directory (never creates it)
+anymd cache stats   # entries, size, budget, version key
+anymd cache clean   # remove cached entries
+```
+
+`--cache-dir DIR` is accepted on either side of the verb. `cache path` never
+creates the directory — it is what a script calls to decide whether a cache
+exists at all. `cache stats` reports an empty cache rather than an error when
+the directory is absent.
+
+```
+$ anymd cache stats
+cache dir:   /Users/you/Library/Caches/anymd
+entries:     1
+size:        244 B
+budget:      256.0 MiB
+version key: v0.1.1-0.20260902132823-8196e256f0d7+dirty
+hit rate:    n/a (per-process; this run made no lookups)
+```
+
+Hit rate is per-process and not persisted. A rate across invocations would need
+a counter file written on every lookup — a write on the read path, which is the
+one thing a cache must not add.
+
+### `clean` cannot become `rm -rf`
+
+Two independent guards, because the failure being prevented is a typo like
+`--cache-dir /` turning a cleanup into data loss:
+
+- `CheckCacheDir` refuses the filesystem root, your home directory, and anything
+  with fewer than two path segments below the root. A single top-level directory
+  is far more likely to be a typo than a cache location.
+- `Clean` deletes **only** files ending in `.json` that pass a containment check
+  resolving `..`. It never deletes outside its own directory. A cache directory
+  that someone also keeps notes in loses the cache and nothing else.
+
+Empty shard directories are then removed deepest-first with a plain `os.Remove`,
+which refuses a non-empty directory — precisely the guard wanted.
+
+## When the cache actually pays
+
+The honest version, measured on this repo (Apple M5 Pro, the plaintext converter
+on a ~110 KB document):
+
+| Benchmark | ns/op | |
+|---|---:|---|
+| `BenchmarkCacheMiss` (convert, no cache) | 126,397 | ~126 µs |
+| `BenchmarkCacheHit` (memory cache hit) | 33,258 | ~33 µs |
+| `BenchmarkDiskCacheHit` | 434,987 | ~435 µs |
+
+A disk hit is roughly **3× slower than simply converting the document again** on
+the cheapest converter. You pay the hash, a file read and a JSON decode to avoid
+work that was cheaper than all three. The in-memory cache still wins there
+(~33 µs against ~126 µs), because it skips the filesystem entirely.
+
+Reproduce both:
+
+```sh
+go test -run '^$' -bench 'CacheMiss|CacheHit|DiskCacheHit' .
+```
+
+Across the project's corpus, hashing a document is between **12× and 1411×
+cheaper than converting it**, median about **230×** — a PDF is the extreme. That
+ratio, not the absolute numbers above, is what decides whether the cache is
+worth it:
+
+- **Not worth it:** plaintext, csv, json — a single pass over bytes. The lookup
+  costs more than the work.
+- **Worth it:** pdf, docx, pptx, xlsx, epub, zip. Xref resolution, unzipping,
+  XML walking, container recursion.
+- **Worth it most of all:** [LLM conversions](/anymd/llm/). A miss costs seconds
+  of latency and real money per image or audio file. A hit costs a hash.
+
+So: turn the cache on for a corpus you re-process, for LLM captioning, and for a
+service converting uploads that repeat. Leave it off for one-shot conversions
+and for pipelines dominated by cheap formats.
+
+<CardGrid>
+	<LinkCard title="Benchmarks" href="/anymd/benchmarks/" description="Per-converter speed numbers, and the fidelity benchmark." />
+	<LinkCard title="Extending it" href="/anymd/extending/" description="Plug in your own Cache — Redis, S3, or a map." />
+</CardGrid>

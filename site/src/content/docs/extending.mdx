@@ -1,0 +1,253 @@
+---
+title: Extending it
+description: Write your own Converter, control dispatch with Priority, and plug in a custom Cache or Describer.
+sidebar:
+  order: 8
+---
+
+import { Aside, Steps, Tabs, TabItem, FileTree, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+A converter is two methods. Implement them, register the converter on your own
+engine, done.
+
+```go
+e := anymd.New()             // every built-in
+e.Register(vcardConverter{}) // yours, ahead of the fallback
+res, err := e.ConvertBytes(card, anymd.StreamInfo{Extension: ".vcf"}, nil)
+```
+
+## A complete converter
+
+Real code for a made-up format, written the way a consumer would write it. Two
+required methods, plus two optional ones.
+
+```go title="vcard.go"
+type vcardConverter struct{}
+
+// Optional. Without it the engine falls back to the Go type name in errors
+// and in Engine.Converters().
+func (vcardConverter) Name() string { return "vcard" }
+
+// Optional. Without it the converter is registered at PrioritySpecific.
+func (vcardConverter) Priority() int { return anymd.PrioritySpecific }
+
+// Accepts is the hot path — it runs against every stream the engine sees — so
+// it looks at hints and a magic prefix only, and never parses the document.
+func (vcardConverter) Accepts(r io.ReadSeeker, info anymd.StreamInfo, opts *anymd.Options) bool {
+	if info.HasExt(".vcf") {
+		return true
+	}
+	var head [11]byte
+	n, _ := io.ReadFull(r, head[:])
+	return string(head[:n]) == "BEGIN:VCARD"
+}
+
+func (vcardConverter) Convert(r io.ReadSeeker, info anymd.StreamInfo, opts *anymd.Options) (anymd.Result, error) {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return anymd.Result{}, err
+	}
+	name, rows := parseVCard(b) // your parsing
+	if name == "" {
+		// Accepting and then failing is a hard error: the engine does not
+		// fall through to a catch-all that would emit the raw file.
+		return anymd.Result{}, errors.New("vcard has no FN (formatted name) property")
+	}
+	md := "# " + name + "\n"
+	if len(rows) > 0 {
+		md += "\n" + strings.Join(rows, "\n") + "\n"
+	}
+	return anymd.Result{Markdown: md, Title: name}, nil
+}
+```
+
+Register it and use it:
+
+```go
+e := anymd.New()
+e.Register(vcardConverter{})
+
+card := []byte("BEGIN:VCARD\nVERSION:3.0\nFN:Ada Lovelace\nEMAIL:ada@example.com\nEND:VCARD\n")
+
+res, err := e.ConvertBytes(card, anymd.StreamInfo{Extension: ".vcf"}, nil)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Print(res.Markdown)
+// # Ada Lovelace
+//
+// - **VERSION**: 3.0
+// - **EMAIL**: ada@example.com
+```
+
+<Aside type="note">
+That converter lives in `example_test.go`, which `go test` compiles and runs
+with its output asserted. It cannot drift from the API.
+</Aside>
+
+## The rules
+
+<Steps>
+
+1. **`Accepts` must be cheap.**
+
+   It runs against every registered converter on every conversion. Hints and
+   magic bytes only, never a full parse. It may read from `r` freely and need
+   not rewind — the engine seeks back to 0 before every `Accepts` and before
+   `Convert`.
+
+2. **Priority is how you win.**
+
+   | Constant | Value | For |
+   |---|---|---|
+   | `PrioritySpecific` | 0 | A unique magic number or extension. The default for a converter implementing no `Prioritized`. |
+   | `PriorityGeneric` | 10 | A broad family that would otherwise shadow a specific format. |
+   | `PriorityFallback` | 100 | The single last-resort text converter. |
+
+   Converters are tried in **ascending** priority; ties break by registration
+   order. A `.vcf` file decodes as UTF-8 text, so at `PriorityFallback` or later
+   the plaintext catch-all would claim it first and emit the raw file. To
+   override a built-in, register at a **lower** priority than it.
+
+3. **Accepting and then failing is a hard error.**
+
+   The engine does not fall through to the next candidate. A corrupt `.docx`
+   that fell through would come back as the plaintext converter's rendering of
+   compressed XML — which looks like output, diffs like output, and is garbage.
+   Decline in `Accepts` when you cannot handle the stream; fail in `Convert`
+   only when you genuinely claimed it.
+
+4. **Never panic.**
+
+   A converter is a parser aimed at bytes someone else chose. Treat every
+   length, index and offset read out of a document as attacker-controlled.
+   Malformed input is an `error`. Wrap a third-party parser that reports
+   corruption by panicking in a `recover`.
+
+5. **Recurse through `opts.Recurse`, never a fresh Engine.**
+
+   ```go
+   func (o *Options) Recurse(r io.ReadSeeker, info StreamInfo) (Result, error)
+   func (o *Options) Depth() int
+   ```
+
+   `Recurse` carries the same engine and options down and increments the depth
+   counter, which is what makes `MaxDepth` real rather than advisory. Past the
+   limit it returns `ErrMaxDepth`; report that inline against the offending
+   member and keep walking the siblings.
+
+6. **Register before you convert.**
+
+   `Register` mutates the `Engine`. Do all registration before the first
+   conversion and before sharing the engine across goroutines. Once built, an
+   `Engine` is safe for concurrent use.
+
+</Steps>
+
+<Aside type="caution" title="internal/mdutil is not importable from outside">
+The table, heading and joining helpers the built-in converters share — `Table`,
+`Heading`, `CodeBlock`, `Join` — live in `internal/mdutil`. Go's `internal` rule
+means an out-of-tree converter cannot import them. Build your Markdown with the
+standard library, or vendor what you need, and match the same output shape:
+headings clamp to 1–6, tables are real GFM pipe tables, code is fenced, blocks
+join with exactly one blank line, and the document ends with exactly one
+newline.
+
+This is a consequence of the `internal` rule, not a policy: keeping those
+helpers unexported means their signatures stay free to change without breaking
+anyone.
+</Aside>
+
+## Contributing a converter in-tree
+
+If the format belongs in anymd itself rather than in your program, the rules
+tighten. `CONTRACT.md` in the repo is the full list; the shape is:
+
+<FileTree>
+- anymd/
+  - converter.go the Converter, Named and Prioritized interfaces
+  - streaminfo.go the hints
+  - engine.go dispatch
+  - conv_plaintext.go **the worked reference — copy its shape**
+  - conv_vcard.go your format, registered from its own init()
+  - conv_vcard_test.go mandatory, fixtures built in Go
+  - internal/
+    - mdutil/ the shared GFM emitters (in-tree only)
+</FileTree>
+
+- One format family, one file, named `conv_<thing>.go`, registered from its own
+  `init()` with `addBuiltin(&XConverter{})`. Never edit `builtins.go`.
+- Never edit `go.mod` / `go.sum`. Every dependency you need is already pinned.
+- Render through `internal/mdutil`. Do not hand-roll pipe tables; a table from
+  xlsx and a table from docx must come out byte-identical.
+- Tests are mandatory. Build fixtures **in Go** — write a real `.docx`/`.zip`
+  with `archive/zip` at test time — rather than committing binaries. Assert
+  exact Markdown output, not "contains".
+- `gofmt` clean, with a doc comment on every exported symbol explaining *why*
+  where the code already says *what*.
+
+## Plugging in a custom Cache
+
+`Cache` is two methods over a string key, so an implementation can be a map, a
+directory, Redis, S3 or a CDN without anymd knowing:
+
+```go
+type Cache interface {
+	Get(key string) (Result, bool)
+	Put(key string, res Result)
+}
+```
+
+```go
+res, err := anymd.ConvertFile("report.pdf", &anymd.Options{Cache: myRedisCache{}})
+```
+
+Two requirements: it **must be safe for concurrent use** (the CLI converts on a
+worker pool), and `Put` is **fire-and-forget** — a cache that cannot store an
+entry must drop it silently rather than fail a conversion that already
+succeeded.
+
+To also remember deterministic failures, implement the optional `ErrorCache`:
+
+```go
+type ErrorCache interface {
+	GetErr(key string) (error, bool)
+	PutErr(key string, err error)
+}
+```
+
+Store only what `anymd.CacheableError(err)` allows — that exported function is
+the same allowlist the built-in caches apply (`ErrNoTextLayer` and
+`ErrUnsupported`, never a timeout, a depth limit, or an I/O error). Registering
+a custom converter changes the engine's registry digest, so your engine gets a
+disjoint key space automatically. See [Caching](/anymd/cache/) for the full key
+derivation.
+
+## Plugging in a custom Describer
+
+You do not need the `llm` package. Any function satisfies the interface:
+
+```go
+d := anymd.DescriberFunc(func(ctx context.Context, img []byte, mime, hint string) (string, error) {
+	// your own model, your own gateway, or a canned string in a test
+	return "a bar chart of quarterly revenue", nil
+})
+
+res, err := anymd.Default().ConvertFile("deck.pptx", &anymd.Options{Describer: d})
+```
+
+`hint` carries whatever the document already said about the image — the author's
+alt text or caption — and may be empty.
+
+Implementations must respect `ctx`, must not panic, and should return an error
+rather than a partial description when the request fails: a converter treats a
+`Describer` error as "no caption available" and continues, so a transient outage
+degrades output instead of failing the document. A `Transcriber` error is
+different — it fails the conversion, because the transcript is the audio file's
+entire content.
+
+<CardGrid>
+	<LinkCard title="Library" href="/anymd/library/" description="The types, the dispatch model and the error sentinels in full." />
+	<LinkCard title="Caching" href="/anymd/cache/" description="What the cache key covers, and why the anymd version is in it." />
+	<LinkCard title="LLM features" href="/anymd/llm/" description="The ready-made Describer and Transcriber in the llm package." />
+</CardGrid>
