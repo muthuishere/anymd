@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -572,8 +573,14 @@ func TestConfigInit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := st.Mode().Perm(); got != 0o600 {
-		t.Fatalf("mode = %o, want 600", got)
+	// Windows has no POSIX permission bits — it uses ACLs, and Go reports 0666
+	// for any file it creates there. The 0600 we pass to OpenFile is still
+	// correct and still honored on every platform that has modes; only the
+	// assertion is Unix-specific.
+	if runtime.GOOS != "windows" {
+		if got := st.Mode().Perm(); got != 0o600 {
+			t.Fatalf("mode = %o, want 600", got)
+		}
 	}
 
 	body, err := os.ReadFile(path)
