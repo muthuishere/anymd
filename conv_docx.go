@@ -1,10 +1,13 @@
 package anymd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strconv"
 	"strings"
 
@@ -59,8 +62,9 @@ func (c *DocxConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options)
 	}
 
 	dc := &docxCtx{
-		rels:     pkg.RelTargets(docxDocumentPart),
-		numbered: docxNumberFormats(pkg.OptionalPart(docxNumberingPar)),
+		rels:      pkg.RelTargets(docxDocumentPart),
+		numbered:  docxNumberFormats(pkg.OptionalPart(docxNumberingPar)),
+		captioner: newOOXMLCaptioner(pkg, opts),
 	}
 	blocks, err := dc.document(data)
 	if err != nil {
@@ -74,8 +78,53 @@ func (c *DocxConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options)
 
 // docxCtx carries the package-level lookups a body walk needs.
 type docxCtx struct {
-	rels     map[string]string // r:id -> hyperlink target
+	rels     map[string]string // r:id -> hyperlink target AND r:embed -> media part
 	numbered map[string]bool   // "numId:ilvl" and "numId" -> is an ordered list
+
+	// captioner is nil unless the caller supplied a Describer; see
+	// ooxmlCaptioner for why nil is the interesting case.
+	captioner *ooxmlCaptioner
+
+	// pending holds captions produced while walking the current paragraph.
+	// An image lives *inline* in a w:p, but its description is prose and
+	// belongs in its own block, so the paragraph walk queues it here and
+	// document() emits it after the paragraph the image sat in.
+	pending []string
+
+	// inTable suppresses captioning inside a w:tbl: a caption cannot be added
+	// to a GFM cell without either breaking the row or burying the prose, so a
+	// table image keeps its alt text and costs no model call.
+	inTable bool
+}
+
+// takePending returns and clears the captions queued by the last paragraph.
+func (dc *docxCtx) takePending() []string {
+	if len(dc.pending) == 0 {
+		return nil
+	}
+	out := dc.pending
+	dc.pending = nil
+	return out
+}
+
+// image renders one w:drawing: the placeholder exactly as it has always been
+// rendered, plus — only when a Describer produced one — a caption queued for
+// emission as the following block. ok is false when there is nothing to emit at
+// all, which is the pre-existing behaviour for an image with no alt text.
+func (dc *docxCtx) image(alt, embedID string) (docxSeg, bool) {
+	caption := ""
+	if !dc.inTable {
+		caption = dc.captioner.caption(docxDocumentPart, embedID, alt)
+	}
+	if caption == "" && alt == "" {
+		return docxSeg{}, false
+	}
+	if caption != "" {
+		dc.pending = append(dc.pending, caption)
+	}
+	// Rendered without a destination: the media part is not inlined, but the
+	// authored description is often the only prose describing the figure.
+	return docxSeg{raw: "![" + alt + "]()"}, true
 }
 
 // docxSeg is one stretch of inline content. raw is set for content that is
@@ -117,16 +166,21 @@ func (dc *docxCtx) document(data []byte) ([]string, error) {
 	}
 
 	var (
-		blocks   []string
-		list     []string
-		counters []int
+		blocks      []string
+		list        []string
+		counters    []int
+		listCaption []string
 	)
+	// A caption belonging to an image inside a list item cannot interrupt the
+	// list, so it is held until the list closes and emitted after it.
 	flushList := func() {
 		if len(list) > 0 {
 			blocks = append(blocks, strings.Join(list, "\n"))
 			list = nil
 			counters = counters[:0]
 		}
+		blocks = append(blocks, listCaption...)
+		listCaption = nil
 	}
 
 	depth := 1
@@ -148,12 +202,14 @@ func (dc *docxCtx) document(data []byte) ([]string, error) {
 				}
 				if p.list {
 					list = append(list, dc.listItem(p, &counters))
+					listCaption = append(listCaption, dc.takePending()...)
 					continue
 				}
 				flushList()
 				if b := dc.block(p); b != "" {
 					blocks = append(blocks, b)
 				}
+				blocks = append(blocks, dc.takePending()...)
 			case "tbl":
 				rows, err := dc.table(d)
 				if err != nil {
@@ -267,15 +323,12 @@ func (dc *docxCtx) paragraph(d *xml.Decoder) (docxPara, error) {
 				}
 				p.segs = append(p.segs, seg)
 			case "drawing":
-				alt, err := docxDrawingAlt(d)
+				alt, embed, err := docxDrawing(d)
 				if err != nil {
 					return p, err
 				}
-				if alt != "" {
-					// Rendered without a destination: the media part is not
-					// extracted, but the authored description is often the only
-					// prose describing the figure.
-					p.segs = append(p.segs, docxSeg{raw: "![" + alt + "]()"})
+				if seg, ok := dc.image(alt, embed); ok {
+					p.segs = append(p.segs, seg)
 				}
 			default:
 				// Descend. Revision marks (w:ins), structured document tags and
@@ -389,16 +442,13 @@ func (dc *docxCtx) run(d *xml.Decoder) ([]docxSeg, error) {
 				}
 				sb.WriteString(" ")
 			case "drawing":
-				alt, err := docxDrawingAlt(d)
+				alt, embed, err := docxDrawing(d)
 				if err != nil {
 					return nil, err
 				}
-				if alt != "" {
+				if seg, ok := dc.image(alt, embed); ok {
 					flush()
-					// Rendered without a destination: the media part is not
-					// extracted, but the authored description is often the only
-					// prose describing the figure.
-					out = append(out, docxSeg{raw: "![" + alt + "]()"})
+					out = append(out, seg)
 				}
 			case "delText":
 				// Deleted text from a tracked change is not part of the document.
@@ -581,6 +631,12 @@ func (dc *docxCtx) tableRow(d *xml.Decoder) ([]string, error) {
 // tableCell consumes one w:tc, returning its collapsed paragraph text and its
 // horizontal span.
 func (dc *docxCtx) tableCell(d *xml.Decoder) (string, int, error) {
+	// Captions cannot live in a GFM cell, so no image inside a table is sent
+	// to the model at all. Restored on the way out because tables nest.
+	wasInTable := dc.inTable
+	dc.inTable = true
+	defer func() { dc.inTable = wasInTable }()
+
 	span := 1
 	var paras []string
 	depth := 1
@@ -822,10 +878,10 @@ func docxCoreTitle(data []byte) string {
 	return strings.TrimSpace(props.Title)
 }
 
-// docxDrawingAlt consumes a w:drawing and returns the normalized alt text of
-// its wp:docPr, falling back to the shape name.
-func docxDrawingAlt(d *xml.Decoder) (string, error) {
-	alt := ""
+// docxDrawing consumes a w:drawing and returns the normalized alt text of its
+// wp:docPr (falling back to the shape name) plus the r:embed relationship id of
+// the first a:blip, which is what names the media part holding the pixels.
+func docxDrawing(d *xml.Decoder) (alt, embed string, err error) {
 	depth := 1
 	for depth > 0 {
 		tok, err := d.Token()
@@ -833,27 +889,33 @@ func docxDrawingAlt(d *xml.Decoder) (string, error) {
 			break
 		}
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if t.Name.Local == "docPr" && alt == "" {
+			switch {
+			case t.Name.Local == "docPr" && alt == "":
 				alt = ooxmlAltText(ooxml.Attr(t, "descr"), ooxml.Attr(t, "name"))
-				if err := ooxml.SkipElement(d); err != nil {
-					if err == io.EOF {
-						depth = 0
-						continue
-					}
-					return "", err
-				}
+			case t.Name.Local == "blip" && embed == "":
+				// r:embed is the internal part; r:link points outside the
+				// package and is deliberately ignored.
+				embed = ooxml.Attr(t, "embed")
+			default:
+				depth++
 				continue
 			}
-			depth++
+			if err := ooxml.SkipElement(d); err != nil {
+				if err == io.EOF {
+					depth = 0
+					continue
+				}
+				return "", "", err
+			}
 		case xml.EndElement:
 			depth--
 		}
 	}
-	return alt, nil
+	return alt, embed, nil
 }
 
 // ooxmlAltText normalizes an authored image description into something safe to
@@ -875,4 +937,132 @@ func ooxmlAltText(descr, name string) string {
 		return r
 	}, alt)
 	return mdutil.Collapse(alt)
+}
+
+// --- shared OOXML image captioning -----------------------------------------
+//
+// docx and pptx both embed images the same way: a drawing carries an r:embed
+// relationship id that resolves, through the *containing part's* rels, to a
+// media part in the archive. Neither converter reads those pixels by default —
+// there is no model in the box, and the placeholder plus the authored alt text
+// is all a pure-Go parse can honestly say. When the caller supplies a
+// Describer, the bytes become worth reading, and everything below exists to
+// read them at the lowest possible cost.
+
+// ooxmlMinCaptionBytes is the size below which an embedded image is assumed to
+// be furniture — a spacer, a bullet glyph, a rule, a 1x1 tracking pixel. A
+// model call on those buys nothing and costs a round trip, so they keep their
+// alt text and nothing more. 4 KiB is comfortably below any real photograph or
+// screenshot and comfortably above the decorative PNGs Office scatters through
+// a template.
+const ooxmlMinCaptionBytes = 4 << 10
+
+// ooxmlMaxCaptionsPerDoc caps how many Describer calls one document may make.
+// A 300-slide deck must not silently fire 300 network requests because someone
+// passed an Options with a Describer; past the cap every further image degrades
+// to its alt text, exactly as if no Describer had been supplied. Deduplicated
+// repeats (the logo on every slide) do not count against it — they cost
+// nothing.
+const ooxmlMaxCaptionsPerDoc = 50
+
+// ooxmlCaptioner resolves embedded images and captions them, once per distinct
+// image, for the lifetime of a single conversion.
+//
+// A nil *ooxmlCaptioner is the "no Describer" case and every method on it is a
+// no-op returning "", so the call sites stay branch-free and — importantly —
+// never read a media part out of the zip when nothing will look at it.
+type ooxmlCaptioner struct {
+	pkg  *ooxml.Package
+	opts *Options
+	// rels caches id -> target per source part, so a 60-slide deck parses each
+	// slide's rels once rather than once per picture.
+	rels map[string]map[string]string
+	// cache maps a sha256 of the image bytes to its caption, which is what
+	// turns "the same logo on 60 slides" into one model call. An empty value
+	// is cached too: a failed or refused image must not be retried 59 times.
+	cache map[string]string
+	calls int
+}
+
+// newOOXMLCaptioner returns nil when the caller supplied no Describer, which is
+// the default and the only mode in which anymd makes no network calls.
+func newOOXMLCaptioner(pkg *ooxml.Package, opts *Options) *ooxmlCaptioner {
+	if pkg == nil || !opts.HasDescriber() {
+		return nil
+	}
+	return &ooxmlCaptioner{
+		pkg:   pkg,
+		opts:  opts,
+		rels:  map[string]map[string]string{},
+		cache: map[string]string{},
+	}
+}
+
+// caption resolves embedID through sourcePart's relationships, reads the media
+// part, and asks the Describer to caption it, passing the document's own alt
+// text as the hint. It returns "" for every reason a caption might not be
+// available — no Describer, an unresolvable id, a vector format, an image below
+// the size floor, the per-document cap, or a Describer error — because the
+// caller's fallback in all of those cases is identical: emit what it emits
+// today.
+func (c *ooxmlCaptioner) caption(sourcePart, embedID, hint string) string {
+	if c == nil || embedID == "" {
+		return ""
+	}
+	rels, ok := c.rels[sourcePart]
+	if !ok {
+		rels = c.pkg.RelTargets(sourcePart)
+		c.rels[sourcePart] = rels
+	}
+	part := ooxml.ResolveTarget(sourcePart, rels[embedID])
+	if part == "" || !c.pkg.Has(part) {
+		return ""
+	}
+	mime := ooxmlImageMime(part)
+	if mime == "" {
+		return "" // unknown or vector: no vision model can read it
+	}
+
+	// Bounded by ooxml.MaxPartSize; a media part that trips the cap comes back
+	// as an error and simply yields no caption.
+	b, err := c.pkg.Part(part)
+	if err != nil || len(b) < ooxmlMinCaptionBytes {
+		return ""
+	}
+
+	sum := sha256.Sum256(b)
+	key := hex.EncodeToString(sum[:])
+	if cached, ok := c.cache[key]; ok {
+		return cached
+	}
+	if c.calls >= ooxmlMaxCaptionsPerDoc {
+		return ""
+	}
+	c.calls++
+	caption := describeImageWithHint(b, mime, hint, c.opts)
+	c.cache[key] = caption
+	return caption
+}
+
+// ooxmlImageMime maps a media part's extension to an image media type, and
+// returns "" for anything a vision model cannot read. EMF, WMF and SVG are
+// deliberately excluded: they are vector drawings, no hosted vision model
+// accepts them, and sending one is a wasted call.
+func ooxmlImageMime(part string) string {
+	switch strings.ToLower(strings.TrimPrefix(path.Ext(part), ".")) {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg", "jpe":
+		return "image/jpeg"
+	case "gif":
+		return "image/gif"
+	case "webp":
+		return "image/webp"
+	case "tif", "tiff":
+		return "image/tiff"
+	case "bmp":
+		return "image/bmp"
+	default:
+		return ""
+	}
 }

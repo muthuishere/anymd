@@ -3,6 +3,8 @@ package anymd
 import (
 	"archive/zip"
 	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -281,5 +283,197 @@ func TestDocxInlineImageAltText(t *testing.T) {
 		"plain\n"
 	if got.Markdown != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	}
+}
+
+// --- image captioning -------------------------------------------------------
+
+// ooxmlStubDescriber is a Describer that never touches the network. It records
+// every call so a test can assert what the converter actually sent — above all
+// that the document's own alt text is passed through as the hint.
+type ooxmlStubDescriber struct {
+	reply string
+	err   error
+	calls []ooxmlStubCall
+}
+
+type ooxmlStubCall struct {
+	n    int
+	mime string
+	hint string
+}
+
+func (s *ooxmlStubDescriber) Describe(_ context.Context, img []byte, mime, hint string) (string, error) {
+	s.calls = append(s.calls, ooxmlStubCall{n: len(img), mime: mime, hint: hint})
+	if s.err != nil {
+		return "", s.err
+	}
+	return s.reply, nil
+}
+
+// ooxmlPixels returns n deterministic, distinct bytes to stand in for an image.
+// The converter picks the media type off the part's extension, so these never
+// have to be a decodable PNG — and keeping them undecodable proves the
+// converter is not quietly trying to decode them.
+func ooxmlPixels(n int, seed byte) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = seed + byte(i%251)
+	}
+	return string(b)
+}
+
+// docxImageRels wires rId3 to word/media/<name>.
+func docxImageRels(name string) string {
+	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"` +
+		` Target="media/` + name + `"/></Relationships>`
+}
+
+// docxDrawingXML builds a w:drawing carrying alt text and an a:blip r:embed.
+func docxDrawingXML(descr, relID string) string {
+	blip := ""
+	if relID != "" {
+		blip = `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+			`<a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+			`<pic:blipFill><a:blip r:embed="` + relID + `"/></pic:blipFill></pic:pic>` +
+			`</a:graphicData></a:graphic>`
+	}
+	return `<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+		`<wp:extent cx="100" cy="100"/><wp:docPr id="1" name="Picture 1" descr="` + descr + `"/>` +
+		blip + `</wp:inline></w:drawing>`
+}
+
+func convertDocxWith(t *testing.T, b []byte, opts *Options) Result {
+	t.Helper()
+	res, err := New().ConvertBytes(b, StreamInfo{Extension: ".docx", FileName: "fixture.docx"}, opts)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	return res
+}
+
+// With a Describer, the image keeps its placeholder and gains the description
+// as its own paragraph block — and the model is told what the author wrote.
+func TestDocxImageCaptionedWithHint(t *testing.T) {
+	stub := &ooxmlStubDescriber{reply: "A bar chart of quarterly revenue."}
+	body := `<w:p><w:r><w:t>Figure 1.</w:t></w:r></w:p>` +
+		`<w:p><w:r>` + docxDrawingXML("Revenue chart", "rId3") + `</w:r></w:p>`
+	fixture := docxFixture(t, body, map[string]string{
+		"word/_rels/document.xml.rels": docxImageRels("image1.png"),
+		"word/media/image1.png":        ooxmlPixels(6000, 1),
+	})
+
+	got := convertDocxWith(t, fixture, &Options{Describer: stub})
+	want := "Figure 1.\n\n![Revenue chart]()\n\nA bar chart of quarterly revenue.\n"
+	if got.Markdown != want {
+		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("describer calls = %d, want 1", len(stub.calls))
+	}
+	if stub.calls[0].hint != "Revenue chart" {
+		t.Errorf("hint = %q, want the authored alt text", stub.calls[0].hint)
+	}
+	if stub.calls[0].mime != "image/png" {
+		t.Errorf("mime = %q, want image/png", stub.calls[0].mime)
+	}
+	if stub.calls[0].n != 6000 {
+		t.Errorf("image bytes = %d, want the whole media part", stub.calls[0].n)
+	}
+}
+
+// The default — no Describer — must read no media at all and emit exactly what
+// it emitted before captioning existed.
+func TestDocxNoDescriberIsUnchangedAndReadsNoMedia(t *testing.T) {
+	body := `<w:p><w:r>` + docxDrawingXML("Revenue chart", "rId3") + `</w:r></w:p>`
+	fixture := docxFixture(t, body, map[string]string{
+		"word/_rels/document.xml.rels": docxImageRels("image1.png"),
+		"word/media/image1.png":        ooxmlPixels(6000, 1),
+	})
+
+	want := "![Revenue chart]()\n"
+	if got := convertDocx(t, fixture); got.Markdown != want {
+		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	}
+	// An Options with no Describer is the same path, explicitly.
+	if got := convertDocxWith(t, fixture, &Options{}); got.Markdown != want {
+		t.Errorf("markdown mismatch with empty Options\n got: %q\nwant: %q", got.Markdown, want)
+	}
+}
+
+// A model outage costs the caption, never the document.
+func TestDocxDescriberFailureDegradesToAltText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stub *ooxmlStubDescriber
+	}{
+		{"error", &ooxmlStubDescriber{err: errors.New("upstream 503")}},
+		{"empty caption", &ooxmlStubDescriber{reply: "   "}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `<w:p><w:r>` + docxDrawingXML("Revenue chart", "rId3") + `</w:r></w:p>`
+			fixture := docxFixture(t, body, map[string]string{
+				"word/_rels/document.xml.rels": docxImageRels("image1.png"),
+				"word/media/image1.png":        ooxmlPixels(6000, 1),
+			})
+			got := convertDocxWith(t, fixture, &Options{Describer: tc.stub})
+			if want := "![Revenue chart]()\n"; got.Markdown != want {
+				t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+			}
+			if len(tc.stub.calls) != 1 {
+				t.Errorf("describer calls = %d, want 1", len(tc.stub.calls))
+			}
+		})
+	}
+}
+
+// Spacers, bullet glyphs and vector drawings are not worth a round trip.
+func TestDocxSkipsTinyAndVectorImages(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		part  string
+		bytes int
+	}{
+		{"below the size floor", "image1.png", ooxmlMinCaptionBytes - 1},
+		{"emf is vector", "image1.emf", 20000},
+		{"wmf is vector", "image1.wmf", 20000},
+		{"svg is vector", "image1.svg", 20000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &ooxmlStubDescriber{reply: "should never be used"}
+			body := `<w:p><w:r>` + docxDrawingXML("Logo", "rId3") + `</w:r></w:p>`
+			fixture := docxFixture(t, body, map[string]string{
+				"word/_rels/document.xml.rels": docxImageRels(tc.part),
+				"word/media/" + tc.part:        ooxmlPixels(tc.bytes, 2),
+			})
+			got := convertDocxWith(t, fixture, &Options{Describer: stub})
+			if want := "![Logo]()\n"; got.Markdown != want {
+				t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+			}
+			if len(stub.calls) != 0 {
+				t.Errorf("describer called %d times, want 0", len(stub.calls))
+			}
+		})
+	}
+}
+
+// An image inside a table cell keeps its alt text and costs nothing: a caption
+// cannot be rendered inside a GFM cell.
+func TestDocxTableImageIsNotCaptioned(t *testing.T) {
+	stub := &ooxmlStubDescriber{reply: "never"}
+	body := `<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t>` +
+		docxDrawingXML("Logo", "rId3") + `</w:r></w:p></w:tc></w:tr></w:tbl>`
+	fixture := docxFixture(t, body, map[string]string{
+		"word/_rels/document.xml.rels": docxImageRels("image1.png"),
+		"word/media/image1.png":        ooxmlPixels(6000, 3),
+	})
+	got := convertDocxWith(t, fixture, &Options{Describer: stub})
+	if !strings.Contains(got.Markdown, "Cell![Logo]()") {
+		t.Errorf("table cell lost its image: %q", got.Markdown)
+	}
+	if len(stub.calls) != 0 {
+		t.Errorf("describer called %d times inside a table, want 0", len(stub.calls))
 	}
 }

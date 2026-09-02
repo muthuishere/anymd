@@ -49,6 +49,11 @@ func (c *PptxConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options)
 	}
 
 	slides := pptxSlideParts(pkg.Names())
+	// One captioner for the whole deck: its dedup cache is what makes the logo
+	// that appears on all 60 slides cost exactly one model call, and its call
+	// counter is what bounds a large deck.
+	captioner := newOOXMLCaptioner(pkg, opts)
+
 	var blocks []string
 	for i, part := range slides {
 		data, err := pkg.Part(part)
@@ -59,7 +64,7 @@ func (c *PptxConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options)
 		// in the file name: a deleted slide leaves a gap in slideN.xml but not
 		// in what a reader sees.
 		blocks = append(blocks, mdutil.Heading(2, "Slide "+strconv.Itoa(i+1)))
-		body, err := pptxSlideBlocks(data, pkg, part)
+		body, err := pptxSlideBlocks(data, pkg, part, captioner)
 		if err != nil {
 			return Result{}, fmt.Errorf("pptx: %s: %w", part, err)
 		}
@@ -117,9 +122,10 @@ func pptxSlideParts(names []string) []string {
 // holding an a:tbl becomes a GFM table; a p:pic becomes an image with its
 // authored alt text; and a c:chart reference is followed into the chart part.
 //
-// pkg and slidePart are needed because a chart is not inline: the slide only
-// carries an r:id that has to be resolved through the slide's relationships.
-func pptxSlideBlocks(data []byte, pkg *ooxml.Package, slidePart string) ([]string, error) {
+// pkg and slidePart are needed because neither a chart nor a picture is inline:
+// the slide carries only an r:id that has to be resolved through the slide's
+// relationships. captioner is nil unless the caller supplied a Describer.
+func pptxSlideBlocks(data []byte, pkg *ooxml.Package, slidePart string, captioner *ooxmlCaptioner) ([]string, error) {
 	d := ooxml.NewDecoder(data)
 	rels := pkg.RelTargets(slidePart)
 	var blocks []string
@@ -161,15 +167,22 @@ func pptxSlideBlocks(data []byte, pkg *ooxml.Package, slidePart string) ([]strin
 				}
 			}
 		case "pic":
-			alt, err := pptxPictureAlt(d)
+			alt, embed, err := pptxPicture(d)
 			if err != nil {
 				return nil, err
 			}
-			if alt != "" {
-				// No destination: the media part is not extracted, but the
+			// The caption, when a Describer produced one, follows the image as
+			// its own paragraph — the way conv_image.go renders a described
+			// image — rather than being stuffed into the alt-text brackets.
+			caption := captioner.caption(slidePart, embed, alt)
+			if alt != "" || caption != "" {
+				// No destination: the media part is not inlined, but the
 				// authored description is often the only prose describing the
 				// figure, so losing it loses real content.
 				blocks = append(blocks, "!["+alt+"]()")
+			}
+			if caption != "" {
+				blocks = append(blocks, caption)
 			}
 		case "chart":
 			id := ooxml.Attr(se, "id")
@@ -508,10 +521,11 @@ func pptxNotesShape(d *xml.Decoder) (string, []string, error) {
 	return phType, paras, nil
 }
 
-// pptxPictureAlt consumes one p:pic and returns its normalized alt text, taken
-// from the descr attribute of p:cNvPr and falling back to its name.
-func pptxPictureAlt(d *xml.Decoder) (string, error) {
-	alt := ""
+// pptxPicture consumes one p:pic and returns its normalized alt text — taken
+// from the descr attribute of p:cNvPr, falling back to its name — plus the
+// r:embed id of its p:blipFill/a:blip, which names the media part holding the
+// pixels.
+func pptxPicture(d *xml.Decoder) (alt, embed string, err error) {
 	depth := 1
 	for depth > 0 {
 		tok, err := d.Token()
@@ -519,27 +533,33 @@ func pptxPictureAlt(d *xml.Decoder) (string, error) {
 			break
 		}
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if t.Name.Local == "cNvPr" && alt == "" {
+			switch {
+			case t.Name.Local == "cNvPr" && alt == "":
 				alt = ooxmlAltText(ooxml.Attr(t, "descr"), ooxml.Attr(t, "name"))
-				if err := ooxml.SkipElement(d); err != nil {
-					if err == io.EOF {
-						depth = 0
-						continue
-					}
-					return "", err
-				}
+			case t.Name.Local == "blip" && embed == "":
+				// r:embed is the packaged part; r:link points outside the
+				// package and is deliberately ignored.
+				embed = ooxml.Attr(t, "embed")
+			default:
+				depth++
 				continue
 			}
-			depth++
+			if err := ooxml.SkipElement(d); err != nil {
+				if err == io.EOF {
+					depth = 0
+					continue
+				}
+				return "", "", err
+			}
 		case xml.EndElement:
 			depth--
 		}
 	}
-	return alt, nil
+	return alt, embed, nil
 }
 
 // pptxChartBlocks follows a c:chart relationship into ppt/charts/chartN.xml and

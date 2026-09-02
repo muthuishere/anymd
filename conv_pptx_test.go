@@ -360,3 +360,179 @@ func TestPptxChartHugePointIndexIsIgnored(t *testing.T) {
 		t.Errorf("got %q, want %q", got.Markdown, want)
 	}
 }
+
+// --- image captioning -------------------------------------------------------
+
+// pptxPicXML builds one p:pic with alt text and an a:blip r:embed.
+func pptxPicXML(descr, relID string) string {
+	return `<p:pic><p:nvPicPr><p:cNvPr id="5" name="Picture 1" descr="` + descr + `"/>` +
+		`<p:cNvPicPr/><p:nvPr/></p:nvPicPr>` +
+		`<p:blipFill><a:blip r:embed="` + relID + `"/></p:blipFill><p:spPr/></p:pic>`
+}
+
+// pptxImageRels wires each rId to ../media/<name>, the target PowerPoint
+// actually writes (slides live one directory below media).
+func pptxImageRels(targets map[string]string) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`)
+	ids := make([]string, 0, len(targets))
+	for id := range targets {
+		ids = append(ids, id)
+	}
+	sortStrings(ids)
+	for _, id := range ids {
+		b.WriteString(`<Relationship Id="` + id + `" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"` +
+			` Target="../media/` + targets[id] + `"/>`)
+	}
+	b.WriteString(`</Relationships>`)
+	return b.String()
+}
+
+func convertPptxWith(t *testing.T, b []byte, opts *Options) Result {
+	t.Helper()
+	res, err := New().ConvertBytes(b, StreamInfo{Extension: ".pptx", FileName: "fixture.pptx"}, opts)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	return res
+}
+
+// A described picture keeps its placeholder and gains the caption as the next
+// block; the authored alt text goes to the model as the hint.
+func TestPptxPictureCaptionedWithHint(t *testing.T) {
+	stub := &ooxmlStubDescriber{reply: "Two engineers at a whiteboard."}
+	slide := pptxSldHeader + pptxShapeXML("title", "Figures") +
+		pptxPicXML("Team photo", "rId3") + pptxSldFooter
+	fixture := pptxFixture(t, 1, map[string]string{
+		"ppt/slides/slide1.xml":            slide,
+		"ppt/slides/_rels/slide1.xml.rels": pptxImageRels(map[string]string{"rId3": "image1.png"}),
+		"ppt/media/image1.png":             ooxmlPixels(9000, 5),
+	})
+
+	got := convertPptxWith(t, fixture, &Options{Describer: stub})
+	want := "## Slide 1\n\n### Figures\n\n![Team photo]()\n\nTwo engineers at a whiteboard.\n"
+	if got.Markdown != want {
+		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	}
+	if len(stub.calls) != 1 || stub.calls[0].hint != "Team photo" {
+		t.Errorf("describer calls = %+v, want one call hinted with the alt text", stub.calls)
+	}
+
+	// The same deck with no Describer is byte-identical to what it always was.
+	plain := convertPptx(t, fixture)
+	if wantPlain := "## Slide 1\n\n### Figures\n\n![Team photo]()\n"; plain.Markdown != wantPlain {
+		t.Errorf("no-describer markdown changed\n got: %q\nwant: %q", plain.Markdown, wantPlain)
+	}
+}
+
+// The single biggest cost saver: one logo repeated on every slide is described
+// once and the caption reused.
+func TestPptxCaptionDedupsIdenticalImages(t *testing.T) {
+	stub := &ooxmlStubDescriber{reply: "The company logo."}
+	parts := map[string]string{"ppt/media/logo.png": ooxmlPixels(8000, 7)}
+	for i := 1; i <= 3; i++ {
+		n := strconv.Itoa(i)
+		parts["ppt/slides/slide"+n+".xml"] = pptxSldHeader + pptxPicXML("Logo", "rId3") + pptxSldFooter
+		// A different relationship id per slide, resolving to the same part:
+		// dedup must key on the bytes, not on the id or the part name.
+		parts["ppt/slides/_rels/slide"+n+".xml.rels"] = pptxImageRels(map[string]string{"rId3": "logo.png"})
+	}
+
+	got := convertPptxWith(t, pptxFixture(t, 3, parts), &Options{Describer: stub})
+	want := "## Slide 1\n\n![Logo]()\n\nThe company logo.\n\n" +
+		"## Slide 2\n\n![Logo]()\n\nThe company logo.\n\n" +
+		"## Slide 3\n\n![Logo]()\n\nThe company logo.\n"
+	if got.Markdown != want {
+		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	}
+	if len(stub.calls) != 1 {
+		t.Errorf("describer calls = %d, want 1 for three copies of one image", len(stub.calls))
+	}
+}
+
+// A big deck must not fire a request per image: past the cap, images fall back
+// to alt text.
+func TestPptxCaptionCapPerDocument(t *testing.T) {
+	stub := &ooxmlStubDescriber{reply: "described"}
+	const pics = ooxmlMaxCaptionsPerDoc + 5
+
+	var slide strings.Builder
+	slide.WriteString(pptxSldHeader)
+	rels := map[string]string{}
+	parts := map[string]string{}
+	for i := 0; i < pics; i++ {
+		id := "rId" + strconv.Itoa(100+i)
+		name := "image" + strconv.Itoa(i) + ".png"
+		slide.WriteString(pptxPicXML("Fig "+strconv.Itoa(i), id))
+		rels[id] = name
+		// Distinct bytes per image, so dedup cannot mask the cap.
+		parts["ppt/media/"+name] = ooxmlPixels(5000, byte(i+1))
+	}
+	slide.WriteString(pptxSldFooter)
+	parts["ppt/slides/slide1.xml"] = slide.String()
+	parts["ppt/slides/_rels/slide1.xml.rels"] = pptxImageRels(rels)
+
+	got := convertPptxWith(t, pptxFixture(t, 1, parts), &Options{Describer: stub})
+	if len(stub.calls) != ooxmlMaxCaptionsPerDoc {
+		t.Errorf("describer calls = %d, want the cap of %d", len(stub.calls), ooxmlMaxCaptionsPerDoc)
+	}
+	if n := strings.Count(got.Markdown, "described"); n != ooxmlMaxCaptionsPerDoc {
+		t.Errorf("captions rendered = %d, want %d", n, ooxmlMaxCaptionsPerDoc)
+	}
+	// Every image still keeps its alt text, capped or not.
+	if n := strings.Count(got.Markdown, "![Fig "); n != pics {
+		t.Errorf("image placeholders = %d, want %d", n, pics)
+	}
+}
+
+// An unresolvable r:embed, a missing media part and an external image all
+// degrade to the alt text without a model call.
+func TestPptxUnresolvableImageIsNotCaptioned(t *testing.T) {
+	stub := &ooxmlStubDescriber{reply: "never"}
+	slide := pptxSldHeader +
+		pptxPicXML("Dangling", "rIdNope") +
+		pptxPicXML("Missing part", "rId3") +
+		pptxSldFooter
+	fixture := pptxFixture(t, 1, map[string]string{
+		"ppt/slides/slide1.xml":            slide,
+		"ppt/slides/_rels/slide1.xml.rels": pptxImageRels(map[string]string{"rId3": "gone.png"}),
+	})
+
+	got := convertPptxWith(t, fixture, &Options{Describer: stub})
+	want := "## Slide 1\n\n![Dangling]()\n\n![Missing part]()\n"
+	if got.Markdown != want {
+		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	}
+	if len(stub.calls) != 0 {
+		t.Errorf("describer called %d times, want 0", len(stub.calls))
+	}
+}
+
+// An image the author never described emits nothing today. With a Describer it
+// becomes an empty placeholder plus the model's prose — the caption is the only
+// thing that makes the position worth marking.
+func TestPptxUndescribedImageGainsCaptionOnly(t *testing.T) {
+	stub := &ooxmlStubDescriber{reply: "A screenshot of the dashboard."}
+	// No descr and no name: nothing the author wrote, so nothing to hint with.
+	pic := `<p:pic><p:nvPicPr><p:cNvPr id="5" name="" descr=""/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>` +
+		`<p:blipFill><a:blip r:embed="rId3"/></p:blipFill><p:spPr/></p:pic>`
+	slide := pptxSldHeader + pic + pptxSldFooter
+	fixture := pptxFixture(t, 1, map[string]string{
+		"ppt/slides/slide1.xml":            slide,
+		"ppt/slides/_rels/slide1.xml.rels": pptxImageRels(map[string]string{"rId3": "image1.png"}),
+		"ppt/media/image1.png":             ooxmlPixels(9000, 11),
+	})
+
+	if got := convertPptx(t, fixture); got.Markdown != "## Slide 1\n" {
+		t.Errorf("no-describer markdown changed: %q", got.Markdown)
+	}
+	got := convertPptxWith(t, fixture, &Options{Describer: stub})
+	want := "## Slide 1\n\n![]()\n\nA screenshot of the dashboard.\n"
+	if got.Markdown != want {
+		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	}
+	if len(stub.calls) != 1 || stub.calls[0].hint != "" {
+		t.Errorf("describer calls = %+v, want one call with an empty hint", stub.calls)
+	}
+}
