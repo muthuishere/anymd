@@ -20,9 +20,16 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 echo "==> building anymd"
 go build -o "$BENCH/anymd" "$ROOT/cmd/anymd"
 
-echo "==> installing markitdown into a venv"
-uv venv --python=3.12 "$BENCH/.venv" >/dev/null
-uv pip install --python "$BENCH/.venv/bin/python" 'markitdown[all]' >/dev/null
+# The venv is reused across runs. Re-creating it costs a minute of downloads
+# and is the only reason a second `run.sh` used to abort on an existing .venv;
+# delete "$BENCH/.venv" to force a clean install on a new markitdown release.
+if [ -x "$BENCH/.venv/bin/markitdown" ]; then
+  echo "==> reusing markitdown venv at $BENCH/.venv"
+else
+  echo "==> installing markitdown into a venv"
+  uv venv --python=3.12 "$BENCH/.venv" >/dev/null
+  uv pip install --python "$BENCH/.venv/bin/python" 'markitdown[all]' >/dev/null
+fi
 
 echo
 echo "==> coverage: substantive output (>200 bytes) per tool"
@@ -30,10 +37,17 @@ a=0; m=0; total=0
 for f in "$CORPUS"/*; do
   [ -f "$f" ] || continue
   total=$((total+1))
-  ab=$("$BENCH/anymd" "$f" 2>/dev/null | wc -c | tr -d ' ')
-  mb=$("$BENCH/.venv/bin/markitdown" "$f" 2>/dev/null | wc -c | tr -d ' ')
-  [ "$ab" -gt 200 ] && a=$((a+1))
-  [ "$mb" -gt 200 ] && m=$((m+1))
+  # `|| true` inside the braces because this table is *about* the files a tool
+  # refuses: anymd exits 1 on a scanned PDF, and with `set -o pipefail` that
+  # nonzero exit propagated out of the command substitution and killed the run
+  # before it could count it.
+  ab=$({ "$BENCH/anymd" "$f" 2>/dev/null || true; } | wc -c | tr -d ' ')
+  mb=$({ "$BENCH/.venv/bin/markitdown" "$f" 2>/dev/null || true; } | wc -c | tr -d ' ')
+  # `if`, not `x && y`: under `set -e` a trailing false `&&` list is a failed
+  # command and aborts the loop, so the count died on the first file a tool
+  # produced no substantive output for — which is precisely what is measured.
+  if [ "$ab" -gt 200 ]; then a=$((a+1)); fi
+  if [ "$mb" -gt 200 ]; then m=$((m+1)); fi
 done
 echo "    anymd $a/$total    markitdown $m/$total"
 
@@ -49,6 +63,7 @@ done
 
 echo
 echo "==> in-process (excludes startup; the fair library comparison)"
+go run "$ROOT/bench/inproc" "$CORPUS"
 "$BENCH/.venv/bin/python" - "$CORPUS" <<'PY'
 import sys, time
 t0 = time.perf_counter()
