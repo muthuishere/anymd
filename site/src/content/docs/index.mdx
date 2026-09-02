@@ -3,7 +3,7 @@ title: anymd
 description: Any document → Markdown, in pure Go. One static binary, one go get-able library — a cgo-free, Python-free alternative to Microsoft markitdown.
 template: splash
 hero:
-  tagline: Any document → Markdown, in pure Go. No cgo, no Python, no native library to ship — one static binary that cross-compiles anywhere Go does.
+  tagline: Any document → Markdown, in pure Go. No cgo, no Python, no native library to ship.
   actions:
     - text: Getting started
       link: /anymd/getting-started/
@@ -16,17 +16,8 @@ hero:
 
 import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-Feed it a file, get clean GitHub-flavored Markdown — for an LLM context window, a diff,
-or a docs pipeline. `anymd` is a Go-native alternative to Microsoft's
-[markitdown](https://github.com/microsoft/markitdown), with a different set of trade-offs:
-
-- **No cgo.** `CGO_ENABLED=0` builds. Nothing to link, nothing to `apt install`.
-- **No Python.** No interpreter, no virtualenv, no wheels that need a C compiler.
-- **No native library to ship.** No poppler, no libmagic, no LibreOffice subprocess.
-- **Library first.** The CLI is a thin shell over the same public API you import.
-- **Cross-compiles everywhere Go does.** `GOOS=windows GOARCH=arm64 go build` and you're done.
-
-## Install
+<div class="am-proof">
+<div class="am-proof-install">
 
 <Tabs syncKey="install">
 <TabItem label="go install">
@@ -46,6 +37,9 @@ go get github.com/muthuishere/anymd
 </TabItem>
 </Tabs>
 
+</div>
+<div class="am-proof-demo">
+
 ```console frame="terminal" title="zsh"
 $ anymd report.docx > report.md
 $ head -4 report.md
@@ -54,6 +48,42 @@ $ head -4 report.md
 | Region | Revenue | Δ QoQ |
 | --- | --- | --- |
 ```
+
+</div>
+</div>
+
+<ul class="am-stats">
+	<li>
+		<span class="am-stat-value">30×</span>
+		<span class="am-stat-label">faster on <code>test.docx</code>, in-process</span>
+	</li>
+	<li>
+		<span class="am-stat-value">22×</span>
+		<span class="am-stat-label">faster on <code>test.pdf</code>, in-process</span>
+	</li>
+	<li>
+		<span class="am-stat-value">27 MB</span>
+		<span class="am-stat-label">peak RSS, against 160 MB</span>
+	</li>
+	<li>
+		<span class="am-stat-value">17 MB</span>
+		<span class="am-stat-label">one binary, against a 318 MB venv</span>
+	</li>
+	<li>
+		<span class="am-stat-value">0.92</span>
+		<span class="am-stat-label">content fidelity over 130 docling documents, against 0.91</span>
+	</li>
+</ul>
+
+Feed it a file, get clean GitHub-flavored Markdown — for an LLM context window, a diff,
+or a docs pipeline. `anymd` is a Go-native alternative to Microsoft's
+[markitdown](https://github.com/microsoft/markitdown), with a different set of trade-offs:
+
+- **No cgo.** `CGO_ENABLED=0` builds. Nothing to link, nothing to `apt install`.
+- **No Python.** No interpreter, no virtualenv, no wheels that need a C compiler.
+- **No native library to ship.** No poppler, no libmagic, no LibreOffice subprocess.
+- **Library first.** The CLI is a thin shell over the same public API you import.
+- **Cross-compiles everywhere Go does.** `GOOS=windows GOARCH=arm64 go build` and you're done.
 
 And the same conversion as a library — the CLI is a thin shell over exactly this:
 
@@ -83,29 +113,6 @@ Every figure below is taken verbatim from
 [`bench/README.md`](https://github.com/muthuishere/anymd/blob/main/bench/README.md) —
 anymd v0.1.0 against markitdown 0.1.5, on an Apple M5 Pro. Run it yourself with
 `./bench/run.sh`. Where markitdown wins, the [benchmarks page](/anymd/benchmarks/) says so.
-
-<ul class="am-stats">
-	<li>
-		<span class="am-stat-value">30×</span>
-		<span class="am-stat-label">faster on <code>test.docx</code>, in-process</span>
-	</li>
-	<li>
-		<span class="am-stat-value">22×</span>
-		<span class="am-stat-label">faster on <code>test.pdf</code>, in-process</span>
-	</li>
-	<li>
-		<span class="am-stat-value">27 MB</span>
-		<span class="am-stat-label">peak RSS, against 160 MB</span>
-	</li>
-	<li>
-		<span class="am-stat-value">17 MB</span>
-		<span class="am-stat-label">install footprint — one binary, against a 318 MB venv</span>
-	</li>
-	<li>
-		<span class="am-stat-value">0.92</span>
-		<span class="am-stat-label">content fidelity over 130 docling documents, against 0.91</span>
-	</li>
-</ul>
 
 ### Speed
 

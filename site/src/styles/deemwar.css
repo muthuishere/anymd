@@ -92,15 +92,15 @@ starlight-tabs [role='tab'][aria-selected='true'] {
 /* ── The stat row on the landing page ── */
 .am-stats {
 	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
-	gap: 0.75rem;
-	margin: 1.75rem 0;
+	grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+	gap: 0.6rem;
+	margin: 1rem 0;
 	padding: 0;
 	list-style: none;
 }
 .am-stats li {
 	margin: 0;
-	padding: 1rem 1.1rem;
+	padding: 0.7rem 0.85rem;
 	border: 1px solid var(--sl-color-hairline);
 	border-radius: 12px;
 	background: linear-gradient(
@@ -111,7 +111,7 @@ starlight-tabs [role='tab'][aria-selected='true'] {
 }
 .am-stats .am-stat-value {
 	display: block;
-	font-size: 1.75rem;
+	font-size: 1.45rem;
 	font-weight: 650;
 	line-height: 1.1;
 	letter-spacing: -0.02em;
@@ -120,8 +120,8 @@ starlight-tabs [role='tab'][aria-selected='true'] {
 }
 .am-stats .am-stat-label {
 	display: block;
-	margin-top: 0.35rem;
-	font-size: 0.8rem;
+	margin-top: 0.25rem;
+	font-size: 0.76rem;
 	line-height: 1.35;
 	color: var(--sl-color-gray-2);
 }
@@ -135,4 +135,55 @@ starlight-tabs [role='tab'][aria-selected='true'] {
 	background: color-mix(in srgb, var(--sl-color-accent) 7%, var(--sl-color-bg));
 	color: var(--sl-color-gray-2);
 	font-size: 0.92rem;
+}
+
+/* ───────────────────────────────────────────────────────────────
+   Landing page (splash template) — evidence above the fold.
+   The stock Starlight hero reserves clamp(2.5rem, 1rem + 10vmin, 10rem)
+   of vertical padding and a 7fr/4fr grid meant for a hero image we do
+   not have, which left a title, a tagline and two buttons floating in
+   ~180px of dead space. Reclaim it, and give the tagline the full
+   column so it sets on two lines instead of three ragged ones.
+   Scoped to [data-has-hero] so ordinary docs pages are untouched.
+   ─────────────────────────────────────────────────────────────── */
+@media (min-width: 50rem) {
+	[data-has-hero] .hero {
+		grid-template-columns: 100%;
+		padding-block: clamp(1.5rem, calc(0.5rem + 3vmin), 3rem) 0.75rem;
+	}
+	[data-has-hero] .hero .copy > * {
+		max-width: 64ch;
+	}
+	[data-has-hero] .hero .stack {
+		gap: 1.25rem;
+	}
+}
+[data-has-hero] .content-panel {
+	padding-block: 1rem;
+}
+[data-has-hero] .content-panel + .content-panel {
+	padding-block-start: 1.25rem;
+}
+
+/* ── Install one-liner + real transcript, side by side under the buttons ── */
+.am-proof {
+	display: grid;
+	gap: 1rem;
+	align-items: start;
+}
+@media (min-width: 60rem) {
+	.am-proof {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		gap: 1.25rem;
+	}
+}
+/* Children are markdown blocks; kill the stacking margin the panel adds. */
+.am-proof > * > :first-child {
+	margin-top: 0;
+}
+.am-proof :is(pre, .expressive-code) {
+	margin-block: 0;
+}
+.am-proof-install starlight-tabs {
+	margin-top: 0;
 }
