@@ -1,9 +1,13 @@
 # anymd — build contract for contributors
 
-Pure-Go any-document → Markdown. **No cgo. No external binaries. No network at
-convert time.** A consumer must get a working library with `go get` and a
+Pure-Go any-document → Markdown. **No cgo. No external binaries. No network the
+caller did not ask for** — the default build makes no convert-time network call
+at all, and everything that needs a model is opt-in behind `--llm` /
+`Options.Describer`. A consumer must get a working library with `go get` and a
 working binary with `go build`, on every platform Go targets. Any change that
-breaks that is wrong, however good the output.
+breaks that is wrong, however good the output. The first half is an invariant
+and the second a default; [ADR 0001](docs/adr/0001-pure-go-no-cgo-no-network.md)
+says why they are not the same promise.
 
 ## The seam (read these three files first)
 
@@ -23,6 +27,8 @@ breaks that is wrong, however good the output.
    its own `init()` with `addBuiltin(&XConverter{})`. Never edit `builtins.go`.
 2. **Never edit `go.mod` / `go.sum`.** Every dependency you need is already
    pinned. If you genuinely need one that is not, stop and report it.
+   Removing one — as vendoring a parser does — is a decision that needs an ADR
+   first, not a `go get` you tidy afterwards.
 3. **Render through `internal/mdutil`** — `Table`, `Heading`, `CodeBlock`,
    `Join`, `EscapeCell`, `Collapse`. Do not hand-roll pipe tables; a table from
    xlsx and a table from docx must come out byte-identical.
@@ -37,6 +43,27 @@ breaks that is wrong, however good the output.
    committing binaries. Assert exact markdown output, not "contains".
 7. `gofmt` clean. Doc comments on every exported symbol, explaining *why* where
    the code does not already say *what*.
+8. **Vendoring third-party code is a last resort, and it is a decision, not a
+   commit.** It is right only when the change lives on an unexported path an
+   importer cannot reach and upstream cannot be waited on — that is exactly why
+   `internal/pdf` exists (see [ADR 0002](docs/adr/0002-vendor-the-pdf-parser.md)).
+   Whenever you do it: keep the upstream `LICENSE`, add a `README.md` recording
+   the origin commit and a table of every local change, exclude the package from
+   `golangci-lint` so upstream's choices are not reported as our defects, and
+   prove behaviour is unchanged on a real corpus before claiming a speedup.
+
+## Why things are the way they are
+
+Decisions whose *result* is visible in the code but whose *reason* is not live
+in [`docs/adr/`](docs/adr/). Read them before proposing to undo one — the
+constraint that forced it is usually still there. The two that bind most
+converters:
+
+- [0001](docs/adr/0001-pure-go-no-cgo-no-network.md) — pure Go, and no network
+  the caller did not ask for. The rule at the top of this file, with the reason
+  the first half is an invariant and the second half is a default.
+- [0002](docs/adr/0002-vendor-the-pdf-parser.md) — why the PDF parser is
+  vendored in-tree, and why the answer was not pdfium.
 
 ## Output style (GitHub-flavored Markdown)
 

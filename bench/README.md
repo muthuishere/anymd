@@ -24,12 +24,12 @@ the honest number for a long-running service.
 
 | file | anymd | markitdown | speedup |
 |---|---:|---:|---:|
-| test.epub | 0.09 ms | 3.06 ms | **34×** |
-| test.docx | 0.47 ms | 17.26 ms | **37×** |
-| test.xlsx | 0.53 ms | 7.61 ms | **14×** |
-| test.pptx | 0.90 ms | 8.68 ms | **9.6×** |
-| test.pdf | 3.22 ms | 73.65 ms | **23×** |
-| test_wikipedia.html (385K) | 11.18 ms | 102.24 ms | **9.1×** |
+| test.epub | 0.10 ms | 3.10 ms | **31×** |
+| test.docx | 0.59 ms | 17.86 ms | **30×** |
+| test.xlsx | 0.64 ms | 7.35 ms | **11×** |
+| test.pptx | 0.91 ms | 8.52 ms | **9.4×** |
+| test.pdf | 3.44 ms | 74.47 ms | **22×** |
+| test_wikipedia.html (385K) | 11.55 ms | 104.15 ms | **9.0×** |
 
 ### PDF used to be the exception — it isn't any more
 
@@ -81,16 +81,16 @@ fast, but it is the door out if fidelity ever beats speed.
 
 ## Speed — CLI end-to-end
 
-markitdown pays **290 ms** of Python import and init on *every* invocation.
+markitdown pays **309 ms** of Python import and init on *every* invocation.
 That cost is real for scripts and shell pipelines, and irrelevant to a
 long-running service — which is why both tables are here.
 
 | file | anymd | markitdown | speedup |
 |---|---:|---:|---:|
-| test.docx | 6.1 ms | 376.7 ms | **62×** |
-| test.xlsx | 6.5 ms | 372.0 ms | **57×** |
-| test.pdf | 8.8 ms | 430.8 ms | **49×** |
-| test_wikipedia.html | 18.4 ms | 465.9 ms | **25×** |
+| test.docx | 6.7 ms | 375.7 ms | **56×** |
+| test.xlsx | 7.0 ms | 377.0 ms | **54×** |
+| test.pdf | 9.4 ms | 431.1 ms | **46×** |
+| test_wikipedia.html | 19.3 ms | 473.6 ms | **25×** |
 
 At this end of the scale anymd is close to the floor: ~6 ms of it is process
 start and exit, which is why the four numbers cluster and why small PDFs show
@@ -100,7 +100,7 @@ no CLI speedup at all even where the library got 10× faster.
 
 | | anymd | markitdown |
 |---|---:|---:|
-| Peak RSS (test_wikipedia.html) | **26 MB** | 162 MB |
+| Peak RSS (test_wikipedia.html) | **27 MB** | 160 MB |
 | Install footprint | **17 MB** (one binary) | 318 MB (venv + deps) |
 
 ## Coverage — the number that is easy to report dishonestly

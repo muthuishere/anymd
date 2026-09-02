@@ -171,19 +171,27 @@ reproducible script: [`bench/`](bench/).
 
 | | anymd | markitdown 0.1.5 |
 |---|---:|---:|
-| docx (in-process) | **0.56 ms** | 17.29 ms |
-| xlsx (in-process) | **0.56 ms** | 7.44 ms |
-| 385K HTML (in-process) | **12.04 ms** | 101.58 ms |
-| pdf (in-process) | **45.69 ms** | 77.27 ms |
-| CLI startup overhead | **none** | 299 ms per invocation |
-| Peak RSS (385K HTML) | **26 MB** | 162 MB |
+| docx (in-process) | **0.59 ms** | 17.86 ms |
+| xlsx (in-process) | **0.64 ms** | 7.35 ms |
+| pdf (in-process) | **3.44 ms** | 74.47 ms |
+| 385K HTML (in-process) | **11.55 ms** | 104.15 ms |
+| CLI startup overhead | **none** | 309 ms per invocation |
+| Peak RSS (385K HTML) | **27 MB** | 160 MB |
 | Install footprint | **17 MB** binary | 318 MB venv |
 | Files with substantive output | 19/31 | 19/31 |
 
-Two honest caveats. **PDF is only 1.7×** — both tools are dominated by the PDF
-parser, so a PDF-heavy corpus will not see order-of-magnitude gains.
-**The benchmark is the default, offline build** — with `--llm` the wall clock is
-whatever the model takes, and the comparison stops being about parsers.
+One honest caveat: **the benchmark is the default, offline build**. With
+`--llm` the wall clock is whatever the model takes, and the comparison stops
+being about parsers.
+
+PDF used to be a second caveat — 45.69 ms and a 1.7× win, explained away as both
+tools being parser-bound. That explanation was wrong. The cost was our own PDF
+library resolving the same font `/Widths` array out of the file bytes once per
+glyph, so page layout was quadratic in glyph count. It is vendored as
+`internal/pdf` now, with the object cache upstream's own doc comment recommends;
+output is byte-identical and the worst corpus document went from 43.77 ms to
+2.60 ms. [`bench/`](bench/) has the before/after table, and
+[ADR 0002](docs/adr/0002-vendor-the-pdf-parser.md) the reasoning.
 
 Where anymd refuses a file, markitdown often returns an empty string and exit 0
 — on the scanned PDF and on both test images. For an ingestion pipeline that is
@@ -224,6 +232,12 @@ That is the shape of the trade, and it is why the default is off rather than
 "on if a key happens to be in the environment": turning it on costs money, sends
 your documents to a third party, and makes the output non-deterministic. Those
 are decisions, not defaults. See [LLM features](#llm-features).
+
+The constraint underneath all four — pure Go, and no network the caller did not
+ask for — is written down with what it costs in
+[ADR 0001](docs/adr/0001-pure-go-no-cgo-no-network.md). The rest of
+[`docs/adr/`](docs/adr/) covers the decisions whose result you can see in the
+code but whose reason you cannot.
 
 ## LLM features
 

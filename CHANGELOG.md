@@ -12,6 +12,41 @@ treated as stable from `0.1.0` onward.
 
 ## [Unreleased]
 
+### Added
+
+- `docs/adr/` — architecture decision records, with
+  [0001](docs/adr/0001-pure-go-no-cgo-no-network.md) (pure Go, and no network
+  the caller did not ask for — why the first half is an invariant and the
+  `--llm` default is not; recorded retrospectively) and
+  [0002](docs/adr/0002-vendor-the-pdf-parser.md) (why the PDF parser is
+  vendored, and why the answer was not pdfium).
+- `CONTRACT.md` rule 8: what vendoring third-party code requires.
+
+### Changed
+
+- **PDF conversion is ~13x faster** (markitdown's `test.pdf`: 45.39 ms -> 3.44 ms
+  in-process; `BenchmarkConvertPdf` 42.6 ms / 1,565,898 allocs / 75 MB ->
+  2.59 ms / 16,605 allocs / 2.2 MB). Output is byte-identical on every file in
+  the corpus, with or without a `Describer`.
+
+  `github.com/ledongthuc/pdf` is now vendored as `internal/pdf` (BSD-3, see
+  `internal/pdf/README.md`) with the one change upstream's own doc comment asks
+  for: a cache of resolved indirect objects. Without it, `Page.Content()` asked
+  each font for a glyph width once per glyph and every ask re-lexed the font's
+  `/Widths` array straight out of the file bytes, making page layout
+  `O(glyphs x len(Widths))`. The win scales with embedded subset fonts, not
+  page count. The vision path added in `cca96b3` is unaffected: it walks raw
+  object offsets rather than resolved values, and still extracts the same three
+  JPEGs, byte for byte, from the corpus's scanned report.
+
+### Fixed
+
+- `bench/run.sh` is re-runnable and completes. It aborted on a second run
+  (existing venv), and `set -o pipefail` made the coverage loop die on the
+  first file a tool exits nonzero for — which is exactly what that table
+  measures. It also now generates anymd's own in-process column
+  (`bench/inproc`) instead of leaving it to be filled in by hand.
+
 ## [0.1.0] - 2026-09-01
 
 Initial release. Any document → Markdown, in pure Go: one static binary and one
