@@ -1,0 +1,191 @@
+---
+title: Agent skill
+description: anymd skills install puts the built-in SKILL.md where AI coding agents look for it — embedded in the binary, and it never overwrites a file you changed.
+sidebar:
+  order: 10
+---
+
+import { Tabs, TabItem, Aside, Steps, FileTree, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+An **agent skill** is a Markdown file with a front-matter `name` and
+`description` that an AI coding agent reads to learn that a tool exists and when
+to reach for it. Agents find them by looking in well-known directories.
+
+anymd ships one, and `anymd skills install` puts it there.
+
+```sh
+anymd skills install
+```
+
+```
+anymd: installed /Users/you/.claude/skills/anymd/SKILL.md
+anymd: installed /Users/you/.agents/skills/anymd/SKILL.md
+anymd: restart your agent if it caches its skill list
+```
+
+The reason this is a subcommand and not a line in a README is distribution. A CLI
+that agents are meant to reach for has to be discoverable *by* those agents.
+Shipping `SKILL.md` inside the repository and hoping somebody finds it and copies
+it by hand is not a distribution path.
+
+## Targets
+
+Two, and both by default:
+
+| `--target` | Directory |
+|---|---|
+| `claude` | `~/.claude/skills/anymd` — Claude Code |
+| `agents` | `~/.agents/skills/anymd` — the shared convention |
+| `all` *(default)* | both |
+
+`anymd skills path` prints them, one per line, so a script never has to hardcode
+either:
+
+```
+$ anymd skills path
+/Users/you/.claude/skills/anymd
+/Users/you/.agents/skills/anymd
+```
+
+`--dir PATH` installs somewhere else instead. `PATH` is the skills **root**, so
+the skill lands in `PATH/anymd` — which is what you want for a project-local
+skills directory checked into a repo:
+
+```sh
+anymd skills install --dir .claude/skills
+```
+
+<FileTree>
+- .claude/
+  - skills/
+    - anymd/
+      - SKILL.md
+</FileTree>
+
+`--dir ~/.claude/skills/anymd` is the natural typo for a path you just read out
+of `skills path`. Treating that as a skills root would bury the skill in
+`.../anymd/anymd`, where no agent looks, so a `--dir` whose last segment is
+already `anymd` is used as-is.
+
+`--dir` and `--target` together is a usage error (exit 2). It is a command line
+that does not mean anything, and guessing which one wins is how the skill lands
+somewhere nobody looks. So is `--force` on `path` or `list`: a flag that does
+nothing is worse than a flag that errors, because `--force` on `list` reads as
+"list and fix", which it is not.
+
+## It never overwrites silently
+
+This is the interesting part. `SKILL.md` is a text file a user may have edited,
+and overwriting it because they typed `install` a second time is the kind of data
+loss a tool never gets forgiven for.
+
+So install compares bytes and takes one of three branches:
+
+<Steps>
+
+1. **Byte-for-byte identical** — nothing to do, and that is a success.
+
+   ```
+   $ anymd skills install --dir .claude/skills
+   anymd: .claude/skills/anymd/SKILL.md is already current
+   anymd: restart your agent if it caches its skill list
+   $ echo $?
+   0
+   ```
+
+2. **The file differs** — a refusal that names the flag, and exit 1. Nothing is
+   written.
+
+   ```
+   $ anymd skills install --dir .claude/skills
+   anymd: .claude/skills/anymd/SKILL.md differs from the built-in skill; pass --force to overwrite it
+   $ echo $?
+   1
+   ```
+
+3. **`--force`** — overwrite, and reset the file mode to `0644` as well, because
+   `os.WriteFile` honours a mode only when it creates the file.
+
+</Steps>
+
+`list` reports the same comparison per target, state first and tab-separated, so
+`anymd skills list | cut -f2` is the path and the state stays readable:
+
+```
+$ anymd skills list
+current	/Users/you/.claude/skills/anymd
+not installed	/Users/you/.agents/skills/anymd
+```
+
+| State | Meaning |
+|---|---|
+| `current` | Every embedded file is present and byte-identical. |
+| `differs` | A file differs, **or** the directory holds only some of the skill — an interrupted install, or an older release with a different file set. |
+| `not installed` | The directory is absent, or holds none of the skill's files. |
+
+That answers the question people actually have, which is "why isn't my agent
+seeing it?" — almost always either "it is not there" or "it is there but it is an
+old copy".
+
+## Uninstall removes only what it installed
+
+```
+$ anymd skills uninstall --dir .claude/skills
+anymd: removed .claude/skills/anymd/SKILL.md
+anymd: removed .claude/skills/anymd
+```
+
+Three rules, and they compose:
+
+- Only the files **this build would have installed** are considered. Anything
+  else in that directory is something anymd did not write, and removing it is not
+  this command's business.
+- A file that **differs** is kept, with the same refusal and the same exit 1 that
+  install gives. `--force` removes it anyway.
+- The directory itself goes **only when it is empty**. If anything is left, the
+  directory stays and the command says what is in it:
+
+  ```
+  anymd: kept .claude/skills/anymd: it still holds 1 file(s) anymd did not install (SKILL.md)
+  ```
+
+Underneath all of that, no path outside the resolved target directory is ever
+created or deleted, and the destination itself is refused if it is the filesystem
+root, your home directory, or anything fewer than two segments below the root.
+`--dir ~` must not be a way to lose your home directory.
+
+## It is embedded in the binary
+
+The skill is compiled in with `go:embed`, not read from disk relative to the
+executable. The people who most need `anymd skills install` are exactly the
+people who ran
+
+```sh
+go install github.com/muthuishere/anymd/cmd/anymd@latest
+```
+
+and have no checkout to read a file from. Install the binary, run one command,
+and the agent can find it.
+
+<Aside type="note" title="stdout stays machine-readable">
+`path` and `list` write to stdout. Every progress line and every diagnostic —
+`installed …`, `already current`, `differs …`, `removed …` — goes to stderr, the
+same contract the rest of the [CLI](/anymd/cli/#1-stdout-is-markdown-stderr-is-diagnostics)
+keeps. So `anymd skills list | cut -f2` is safe to script against.
+</Aside>
+
+## Exit codes
+
+| Code | When |
+|---|---|
+| `0` | Installed, already current, listed, or uninstalled. |
+| `1` | A file differs and `--force` was not passed, or a filesystem error. |
+| `2` | Usage: an unknown verb, an unknown `--target`, `--dir` with `--target`, `--force` where it means nothing, or an unsafe destination. |
+
+A usage error outranks a failure when several targets are processed, because it
+says the command line — not the disk — is what needs fixing.
+
+<CardGrid>
+	<LinkCard title="CLI reference" href="/anymd/cli/" description="Every flag and subcommand, and the stdout/stderr contract." />
+	<LinkCard title="Crawling a site" href="/anymd/crawl/" description="Mirror a docs site into Markdown an agent can read." />
+</CardGrid>

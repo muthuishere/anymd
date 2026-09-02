@@ -11,6 +11,8 @@ import { Tabs, TabItem, Aside, Steps, Code, LinkCard, CardGrid } from '@astrojs/
 anymd [flags] [file|url ...]
 anymd config <path|show|init> [--llm-config FILE]
 anymd cache  <path|stats|clean> [--cache-dir DIR]
+anymd skills <install|list|path|uninstall> [--target T] [--dir PATH]
+anymd --crawl --depth 2 -d out/ https://example.dev/
 ```
 
 With no arguments — or the conventional `-` — anymd reads stdin. With a single
@@ -46,7 +48,7 @@ Use `-q` to silence per-file progress when you only want real errors on stderr.
 |---|---|
 | `0` | Every input converted. |
 | `1` | One or more inputs failed — an unreadable file, a scanned PDF with no text layer, an unsupported type, an HTTP error. |
-| `2` | Usage error: unknown flag, `-o FILE` with several inputs, `-o` together with `-d`, an `--llm-*` flag without `--llm`, `--cache-dir` without `--cache`. |
+| `2` | Usage error: unknown flag, `-o FILE` with several inputs, `-o` together with `-d`, an `--llm-*` flag without `--llm`, `--cache-dir` without `--cache`, a crawl flag without `--crawl`. |
 
 `1` means the document was bad. `2` means the invocation was bad. Those want
 different responses in CI, which is the whole reason they are separate.
@@ -109,6 +111,40 @@ Measured on this repo: a disk hit is ~435 µs against ~126 µs to simply convert
 the document again on the plaintext converter. Turn it on for pdf/docx-class
 work, for a corpus you re-process, and above all for `--llm` runs. See
 [when the cache pays](/anymd/cache/#when-the-cache-actually-pays).
+</Aside>
+
+### Crawl flags
+
+Off by default — without `--crawl`, a URL argument is fetched once and nothing is
+followed. Each of these is a usage error without `--crawl`. Detail on the
+[crawl page](/anymd/crawl/).
+
+| Flag | Argument | Default | What it does |
+|---|---|---|---|
+| `--crawl` | — | off | Follow links from each URL argument. Requires `-d DIR`; with `-o` it is a usage error. |
+| `--depth` | N | `1` | How many links deep to follow. `--depth 0` is the seed page only. |
+| `--max-pages` | N | `200` | Cap the total number of pages fetched. |
+| `--crawl-delay` | D | `500ms` | Wait between requests to one host. There is deliberately no way to ask for none. |
+| `--same-host` | bool | `true` | Stay on the seed's host. `--same-host=false` lets the crawl leave it. |
+| `--include` | RE | — | Only crawl URLs matching this regexp. Repeatable. |
+| `--exclude` | RE | — | Never crawl URLs matching this regexp. Repeatable, and it wins over `--include`. |
+| `--ignore-robots` | — | off | Do not read `robots.txt`. |
+
+```sh
+anymd --crawl --depth 2 -d ./site https://example.dev/
+```
+
+Each page is converted, its output path derived from its URL, and its links to
+other crawled pages rewritten to relative local paths — so the directory browses
+offline. A link to a page that was **not** crawled stays absolute, so it still
+works.
+
+<Aside type="caution" title="--ignore-robots is a decision, not a convenience">
+`robots.txt` is respected by default, a `Crawl-delay` it asks for is honoured as
+a floor, and the crawl stays on the seed's host. Turning any of that off points a
+program at somebody else's server against its stated wishes, with
+terms-of-service consequences. See
+[politeness and safety](/anymd/crawl/#politeness-and-safety).
 </Aside>
 
 ### LLM flags
@@ -270,6 +306,32 @@ hit rate:    n/a (per-process; this run made no lookups)
 Because the key covers the anymd version, an upgrade invalidates every entry on
 its own — `clean` is for reclaiming disk space, not for correctness.
 
+## The `skills` subcommand
+
+Installs anymd's built-in agent skill where AI coding agents look for it. Full
+detail on the [agent skill page](/anymd/skills/).
+
+```sh
+anymd skills install    # write SKILL.md into the target directories
+anymd skills list       # per target: current / differs / not installed
+anymd skills path       # print the target directories, one per line
+anymd skills uninstall  # remove only the files anymd installed
+```
+
+| Flag | Argument | Default | What it does |
+|---|---|---|---|
+| `--target` | `claude` \| `agents` \| `all` | `all` | `~/.claude/skills`, `~/.agents/skills`, or both. |
+| `--dir` | PATH | — | Install into PATH instead; PATH is the skills root, so the skill lands in `PATH/anymd`. Mutually exclusive with `--target`. |
+| `--force` | — | off | Overwrite (or remove) a file that differs from the built-in skill. Meaningless on `path` and `list`, where it is a usage error. |
+
+Flags are accepted on either side of the verb, as with `config` and `cache`. The
+skill is compiled into the binary, so this works from a `go install` with no
+repository checked out.
+
+Nothing is overwritten silently: an identical file is `already current` and exit
+0, a file that differs is a refusal naming `--force` and exit 1. `path` and
+`list` write to stdout; every diagnostic goes to stderr.
+
 ## Worked examples
 
 ### Feed a RAG pipeline, branching on the exit code
@@ -339,4 +401,6 @@ decodes as text.
 <CardGrid>
 	<LinkCard title="Formats" href="/anymd/formats/" description="What each of those converters extracts, and what it does not." />
 	<LinkCard title="LLM features" href="/anymd/llm/" description="What --llm turns on, what it costs, and the guards." />
+	<LinkCard title="Crawling a site" href="/anymd/crawl/" description="--crawl, sitemaps, link rewriting, and the politeness rules." />
+	<LinkCard title="Agent skill" href="/anymd/skills/" description="anymd skills install, and why it never overwrites silently." />
 </CardGrid>

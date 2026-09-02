@@ -1,0 +1,412 @@
+---
+title: Crawling a site
+description: --crawl walks a site and writes one Markdown file per page, with links rewritten to relative local paths. Sitemap-aware, robots-respecting, off by default.
+sidebar:
+  order: 9
+---
+
+import { Tabs, TabItem, Aside, Steps, FileTree, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+`--crawl` follows links from a URL argument, converts every page it fetches, and
+writes the result as a directory of Markdown. Links between crawled pages are
+rewritten to relative local paths, so the directory browses offline.
+
+It is **off by default**. Without `--crawl`, a URL argument is fetched once and
+nothing is followed.
+
+## One command
+
+```sh
+anymd --crawl --depth 2 -d ./site https://example.dev/
+```
+
+Progress goes to stderr; the output is files.
+
+```
+crawled 1 http://example.dev/
+crawled 2 http://example.dev/guide/
+crawled 3 http://example.dev/docs/deep/api.html
+crawl: fetched 3, written 3, skipped 1, failed 0
+```
+
+What lands on disk:
+
+<FileTree>
+- site/
+  - index.md
+  - guide/
+    - index.md
+  - docs/
+    - deep/
+      - api.html.md
+</FileTree>
+
+The output path is derived from the URL by `crawl.LocalPath`:
+
+| URL | File |
+|---|---|
+| `https://example.dev/` | `index.md` |
+| `https://example.dev/guide/` | `guide/index.md` |
+| `https://example.dev/docs/deep/api.html` | `docs/deep/api.html.md` |
+| `https://example.dev/search?q=a` | `search-25ac286f.md` |
+| `https://example.dev/README` | `README-3c03735b.md` |
+
+Two rules explain that table. The extension is **appended, never substituted** —
+`/a.html` becomes `a.html.md`, because stripping `.html` would collide it with
+`/a`. And anything a filename cannot express — a query string, a rewritten
+character, a truncated segment, a segment that is not already lowercase — earns
+an 8-hex-character suffix of the SHA-256 of the normalised URL. `README` gets one
+because the default filesystems on macOS and Windows are case-insensitive, and
+`/README` and `/readme` are two different URLs.
+
+`--crawl` requires `-d DIR`. A mirror on stdout is not a mirror, and there would
+be no way to name the files it produced, so `--crawl` with `-o` is a usage error
+(exit 2). So is a crawl flag without `--crawl`, and so is a non-`http(s)`
+argument.
+
+## Flags
+
+| Flag | Argument | Default | What it does |
+|---|---|---|---|
+| `--crawl` | — | off | Follow links from each URL argument. Requires `-d DIR`. |
+| `--depth` | N | `1` | How many links deep to follow. `--depth 0` is the seed page only. A negative value is a usage error. |
+| `--max-pages` | N | `200` | Cap the total number of pages fetched. |
+| `--crawl-delay` | D | `500ms` | Wait between requests to one host, e.g. `1s`. There is deliberately no way to ask for none. |
+| `--same-host` | bool | `true` | Stay on the seed's host. `--same-host=false` lets the crawl leave it. |
+| `--include` | RE | — | Only crawl URLs matching this regexp. Repeatable. |
+| `--exclude` | RE | — | Never crawl URLs matching this regexp. Repeatable, and it wins over `--include`. |
+| `--ignore-robots` | — | off | Do not read `robots.txt`. See the caution below. |
+
+`--include` and `--exclude` are compiled before the first request goes out, so a
+bad pattern is exit 2 rather than an error halfway through a site. They apply to
+**discovered links only, never to the seed** — a crawl that silently fetched
+nothing because the seed failed its own `--include` filter would be a confusing
+way to report a typo.
+
+```sh
+# the reference section only, and never the changelog
+anymd --crawl --depth 3 --max-pages 500 \
+  --include '/docs/reference/' --exclude '/changelog' \
+  -d ./ref https://example.dev/docs/reference/
+```
+
+### Bounds you cannot change
+
+A crawl talks to servers it does not control, so these are memory and liveness
+guarantees rather than preferences:
+
+| Bound | Value |
+|---|---|
+| One response body | 32 MiB |
+| The whole crawl | 512 MiB |
+| `robots.txt` | 512 KiB |
+| One redirect chain | 5 hops |
+| One request, end to end | 30 s |
+| The whole `--crawl` run (CLI) | 30 min |
+| A generated path | 180 characters, 100 per segment |
+
+Hitting `--max-pages`, `--depth` or the byte budget **truncates** rather than
+failing, and the summary line says so: `(truncated: a --depth or --max-pages cap
+stopped the crawl early)`. A caller must be able to tell "that is the whole site"
+from "I stopped early".
+
+## Sitemaps
+
+Before following a single link, the crawl looks for the site's sitemap. URLs it
+lists enter the frontier at **depth 0** — they are seeds, not discoveries — so
+`--depth` still governs how far link-following goes from each one.
+
+### Discovery order
+
+First source that yields any URL wins:
+
+<Steps>
+
+1. Every `Sitemap:` directive in the origin's `robots.txt`. That file is fetched
+   anyway, and it is the only place a site can *tell* you where its sitemap is.
+   Skipped entirely under `--ignore-robots`, because then `robots.txt` is never
+   fetched and there is nothing to read the directive from.
+
+2. `/sitemap.xml` at the origin.
+
+3. `/sitemap_index.xml` at the origin.
+
+</Steps>
+
+A sitemap that is missing, refused, oversized, gzip-bombed or malformed is not an
+error. It means that source yielded nothing, and the next one — or plain link
+crawling — takes over. Nothing in sitemap discovery can fail a crawl.
+
+<Aside type="tip" title="A sitemap is a hint, not an authority">
+Every URL a sitemap lists goes through exactly the gates a discovered link goes
+through: same-host, `--include`/`--exclude`, `robots.txt`, `--max-pages`,
+normalisation and dedup. A site cannot use its own sitemap to send anymd at
+another host, or at a path its own `robots.txt` forbids.
+
+Sitemap **documents** are a stricter case still: they are only ever fetched from
+the seed's own host, children of a `<sitemapindex>` included. That is what the
+protocol requires, and it is what stops an index walking the crawler onto
+somebody else's server one hop at a time.
+</Aside>
+
+### Gzip and index fan-out
+
+A sitemap is decompressed if its first two bytes are the gzip magic, which covers
+both `Content-Encoding: gzip` and the far more common case of a `.xml.gz` served
+as a plain file with a content type like `application/gzip`. The decompressed
+size is capped independently of the transfer size — a few KiB on the wire can be
+gigabytes expanded, and this is a document written by the site being crawled.
+
+A `<sitemapindex>` is walked breadth-first. Fetching a document already fetched
+is a no-op, so an index that points at itself terminates on the dedup rather than
+at the depth cap.
+
+| Sitemap bound | Value |
+|---|---|
+| `<sitemapindex>` nesting | 3 levels below the root document |
+| Documents fetched per discovery | 50, shared across every source |
+| One document, on the wire *and* decompressed | 32 MiB each |
+| URLs collected per discovery | 50,000 |
+
+XML namespaces are matched on the **local** element name in any namespace. The
+schema is `http://www.sitemaps.org/schemas/sitemap/0.9`, and a large minority of
+live sitemaps declare it wrong, declare a different one, or declare none at all.
+
+### The three modes
+
+<Aside type="note" title="There is no CLI flag for this yet">
+`--help` lists no sitemap flag, so the CLI always runs in the default mode,
+`SitemapAuto`. Choosing `SitemapOnly` or `SitemapOff` is a library-only decision
+today, via `crawl.Options.Sitemap`.
+</Aside>
+
+| Mode | Behaviour |
+|---|---|
+| `SitemapAuto` *(zero value, the default)* | Use a sitemap when one is found **and** still follow links. Finds pages the seed does not link to, in one request instead of a walk. |
+| `SitemapOnly` | Fetch the seed plus the URLs a sitemap lists, and follow no links at all. For a large site whose sitemap is authoritative. With no sitemap this fetches the seed and nothing else — not an error, just what "only the sitemap" means when there is no sitemap. |
+| `SitemapOff` | Never fetch a sitemap. Discover pages by following links, exactly as anymd did before sitemaps existed. |
+
+`crawl.Result` splits the count by how each page was **discovered**:
+`FromSitemap`, `FromLinks`, and `Sitemaps` — the sitemap documents actually
+fetched and parsed, so a caller can tell "no sitemap existed" from "the sitemap
+existed and was empty". The seed is neither, so the two counters sum to `Fetched`
+minus one whenever the seed was fetched successfully.
+
+## Link rewriting
+
+This is the point of the feature. A mirrored site whose links still point at the
+internet is not a mirror.
+
+The rewrite runs in a second pass, after the crawl finishes. It has to: page 1
+may link to page 40, and until page 40 has an output path there is nothing to
+rewrite that link *to*.
+
+Take the page written to `docs/deep/api.html.md`. Its source HTML was:
+
+```html
+<p>See the <a href="/">home page</a> and
+the <a href="https://other.example/spec">spec</a>.</p>
+```
+
+The file on disk:
+
+```markdown title="site/docs/deep/api.html.md"
+# API
+
+See the [home page](../../index.md) and the [spec](https://other.example/spec).
+```
+
+Three behaviours in one line:
+
+- **A crawled page becomes a relative path.** The root was written to `index.md`;
+  from two directories down that is `../../index.md`. Every emitted path is
+  relative to where *this* document was written, so the tree moves as a unit.
+- **A page that was not crawled stays absolute.** `https://other.example/spec`
+  was off-host and skipped, so it has no entry in the mapping and is left exactly
+  as it was — it still works. The same applies to a page that failed to convert:
+  it is left out of the mapping, so links to it stay absolute, and the crawl goes
+  on.
+- **A URL inside a fenced code block is left alone.** That is content, not
+  navigation; rewriting it would silently corrupt the very example a reader is
+  about to copy. Indented code blocks are skipped for the same reason.
+
+````markdown
+See the [home page](../../index.md).   <- rewritten
+
+```sh
+curl https://example.dev/              <- untouched
+```
+````
+```
+
+The rewriter is deliberately conservative in both directions. It is a pure
+function over text — no network, no filesystem — and anything it does not fully
+understand it copies through byte for byte. If its parser ever goes wrong the
+document comes back unrewritten rather than corrupted: a crawl feeds it
+attacker-influenced Markdown, and *left it alone* is always a safe answer while
+*half-rewrote it* is not.
+
+Lookup tolerates the small differences that make one URL two: a trailing slash,
+a fragment, and the case of the scheme and host.
+
+It is exported, so a library caller gets the same behaviour:
+
+```go
+md = anymd.RewriteLinks(md, pageURL, map[string]string{
+	"https://example.dev/": "index.md",
+})
+```
+
+## Politeness and safety
+
+<Aside type="caution" title="You are pointing a program at somebody else's server">
+`robots.txt` is **respected by default**, and it applies to the seed as much as
+to anything else: if a site says do not fetch this, "but you typed it" is not an
+answer. A `Crawl-delay` in the group that applies to anymd is honoured as a
+**floor** — it wins whenever it is longer than `--crawl-delay`.
+
+The default inter-request delay is 500 ms per host and cannot be set to zero. A
+fast crawler is a denial of service.
+
+The crawl stays on the seed's host unless you pass `--same-host=false`. Escaping
+onto the open web is a choice, not a default.
+
+`--ignore-robots` is a real decision with real consequences. It means fetching
+pages whose owner has published a machine-readable request that you not fetch
+them. That can get your address blocked, it breaks the one convention that keeps
+automated clients tolerated on the open web, and under some terms of service and
+in some jurisdictions it is the difference between reading a site and breaching a
+contract. Crawling someone else's site has terms-of-service implications whether
+or not you pass this flag. Use it on infrastructure you own, or with the
+operator's agreement — not because the crawl was inconvenient.
+</Aside>
+
+Every request carries a `User-Agent` naming anymd and its repository, so an
+operator seeing it in a log can find out what just walked their site:
+
+```
+anymd-crawler (+https://github.com/muthuishere/anymd)
+```
+
+`robots.txt` parsing is deliberately minimal. The format has no ratified grammar,
+only a de facto one, and a parser that guesses at its exotic corners is a parser
+that will one day guess "allowed" when the site meant "no". The group naming
+anymd's token exactly wins, otherwise the `*` group applies; anything not
+understood is ignored, and a file that cannot be parsed at all means crawling is
+allowed — the standard's behaviour, and what every major crawler implements.
+
+Nothing a crawl writes can land outside `-d`. `crawl.LocalPath` sanitises every
+path segment to `[A-Za-z0-9._-]` and resolves away `..`, and the CLI then checks
+the result *again* before creating a file. These are paths derived from remote
+input, and one layer of defence against `../../.ssh/authorized_keys` is not
+enough.
+
+## The `crawl` package
+
+```go
+import "github.com/muthuishere/anymd/crawl"
+
+res, err := crawl.Crawl(ctx, "https://example.dev/", crawl.Options{
+	MaxDepth: 2,
+	MaxPages: 500,
+}, func(p crawl.Page) error {
+	rel, err := crawl.LocalPath(p.URL, ".md")
+	if err != nil {
+		return err
+	}
+	fmt.Println(rel, len(p.Body), p.Depth)
+	return nil
+})
+```
+
+`visit` is called serially, so it needs no locking. Returning an error from it
+aborts the crawl. The walk is breadth-first **by depth**: every URL at depth *d*
+is fetched before any at depth *d+1*, so `MaxDepth` means what a reader expects
+and `MaxPages` truncates the deepest pages rather than an arbitrary slice of the
+site. A URL is fetched at most once, and after a redirect it is the *final* URL
+that is recorded, so two paths that redirect to one page are fetched once.
+
+`Options` is taken by value and normalised into a copy, so one `Options` can be
+reused across crawls and `Crawl` never mutates it.
+
+### Two fields, two different answers to "unset"
+
+`Options` contains a deliberate asymmetry that is worth understanding before you
+copy the pattern.
+
+<Tabs>
+<TabItem label="SameHost is a *bool">
+
+```go
+SameHost *bool
+```
+
+The wanted default is `true`. The zero value of a `bool` is `false`. With a plain
+field, a caller who never thought about it would silently get the **dangerous**
+behaviour — a crawl escaping onto the open web because nobody typed anything. A
+plain `bool` simply cannot express "unset", so "unset" and "off" would be
+indistinguishable.
+
+The pointer makes "unset" representable. `nil` takes the safe default, and
+leaving the seed's host has to be said out loud:
+
+```go
+opts.SameHost = crawl.Ptr(false) // yes, really crawl the open web
+```
+
+Inverting the field to `CrossHost bool` would also make the zero value safe, but
+it would silently change the meaning of code already written against the
+documented `SameHost` field. The pointer keeps the field's name and sense and
+fixes the actual problem.
+
+</TabItem>
+<TabItem label="SitemapMode is a plain enum">
+
+```go
+Sitemap SitemapMode
+```
+
+No pointer, and none is needed. The enum is **ordered so that the safe, wanted
+default is the zero value**: `SitemapAuto` is `0`. Here "unset" and "the default"
+are the same constant, so nothing is lost by making the field a plain value.
+
+That contrast is the whole rule. A pointer is not a style choice about
+optionality — it is what you reach for when the safe default is *not* the zero
+value, and nothing more.
+
+</TabItem>
+</Tabs>
+
+`MaxDepth` is a third case. `0` is meaningful ("the seed only") *and* the zero
+value, so "unset" cannot be distinguished there either — a **negative**
+`MaxDepth` is how you ask for the default, and `0` is honoured literally. The CLI
+registers `--depth` with `-1` for exactly this reason, and rejects a negative
+value you type yourself.
+
+### Options
+
+| Field | Default when unset | Notes |
+|---|---|---|
+| `MaxDepth int` | `1` (negative means unset) | `0` is honoured literally: the seed only. |
+| `MaxPages int` | `200` (`<= 0` means unset) | |
+| `SameHost *bool` | `true` | `nil` is unset. See above. |
+| `Delay time.Duration` | `500ms` (`<= 0` means unset) | No way to ask for none. |
+| `UserAgent string` | `crawl.DefaultUserAgent` | |
+| `IgnoreRobots bool` | `false` | Leaving it false is the right answer. |
+| `Include, Exclude []string` | none | Regexps over the full URL. `Exclude` wins. A bad pattern is a returned error, not a mid-crawl panic. |
+| `Insecure bool` | `false` | Skips TLS verification. |
+| `Sitemap SitemapMode` | `SitemapAuto` | The zero value is the default. |
+
+<Aside type="note" title="Crawling lives outside the converter path on purpose">
+anymd's core guarantee is that **a converter never touches the network**, which
+is what makes it safe to point at untrusted input. Crawling is network by
+definition, so it is a separate package a caller opts into — never something a
+conversion can trigger. The CLI's `--crawl` and its explicit URL arguments are
+the only fetches it makes, and both happen before any converter sees a byte.
+</Aside>
+
+<CardGrid>
+	<LinkCard title="CLI reference" href="/anymd/cli/" description="Every flag, the stdout/stderr contract, and the exit codes." />
+	<LinkCard title="Library" href="/anymd/library/" description="Engine, Converter, StreamInfo, Options, Result." />
+	<LinkCard title="Caching" href="/anymd/cache/" description="--cache pays for itself on a corpus you re-process." />
+</CardGrid>

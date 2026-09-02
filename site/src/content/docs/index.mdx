@@ -75,6 +75,10 @@ $ head -4 report.md
 	</li>
 </ul>
 
+anymd converts **16 file formats** to Markdown — documents, spreadsheets, email, archives — and can crawl a site into a Markdown mirror with its links rewritten to the local files. It is a Go library first, with a CLI wrapper and an installable agent skill.
+
+Against Microsoft's [markitdown](https://github.com/microsoft/markitdown) it is **9–31× faster in-process** depending on format, ships as a **15 MB binary** instead of a 318 MB virtualenv, and scores **higher on document fidelity** across docling's 130-document corpus. Model-backed OCR, image captioning and audio transcription are available but **off by default**, so a default build makes no network call at all.
+
 Feed it a file, get clean GitHub-flavored Markdown — for an LLM context window, a diff,
 or a docs pipeline. `anymd` is a Go-native alternative to Microsoft's
 [markitdown](https://github.com/microsoft/markitdown), with a different set of trade-offs:
@@ -186,6 +190,10 @@ remaining gap, and the [benchmarks page](/anymd/benchmarks/) names it.
 	<Card title="Caching" icon="seti:db">
 		`--cache` reuses a previous conversion of identical bytes. Off by default.
 		[Caching →](/anymd/cache/)
+	</Card>
+	<Card title="Crawling a site" icon="seti:html">
+		`--crawl` mirrors a site into Markdown, links rewritten to relative local paths.
+		[Crawling a site →](/anymd/crawl/)
 	</Card>
 	<Card title="Benchmarks" icon="bars">
 		The full speed, memory, coverage and docling-quality numbers, and how to rerun them.

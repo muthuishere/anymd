@@ -48,6 +48,7 @@ export default defineConfig({
 						{ label: 'CLI', slug: 'cli' },
 						{ label: 'Library', slug: 'library' },
 						{ label: 'Formats', slug: 'formats' },
+						{ label: 'Crawling a site', slug: 'crawl' },
 					],
 				},
 				{
@@ -56,6 +57,7 @@ export default defineConfig({
 						{ label: 'LLM features', slug: 'llm' },
 						{ label: 'Caching', slug: 'cache' },
 						{ label: 'Extending it', slug: 'extending' },
+						{ label: 'Agent skill', slug: 'skills' },
 					],
 				},
 				{

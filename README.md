@@ -2,6 +2,10 @@
 
 **Any document → Markdown, in pure Go.** One static binary, one `go get`-able library.
 
+anymd converts **16 file formats** to Markdown — documents, spreadsheets, email, archives — and can crawl a site into a Markdown mirror with its links rewritten to the local files. It is a Go library first, with a CLI wrapper and an installable agent skill.
+
+Against Microsoft's [markitdown](https://github.com/microsoft/markitdown) it is **9–31× faster in-process** depending on format, ships as a **15 MB binary** instead of a 318 MB virtualenv, and scores **higher on document fidelity** across docling's 130-document corpus. Model-backed OCR, image captioning and audio transcription are available but **off by default**, so a default build makes no network call at all.
+
 ```sh
 anymd report.docx > report.md
 ```
@@ -110,6 +114,13 @@ anymd [flags] [file|url ...]
 | `--cache` | reuse a previous conversion of identical bytes (off by default) |
 | `--no-cache` | force a fresh conversion; wins over `--cache` |
 | `--cache-dir DIR` | cache location (default `os.UserCacheDir()/anymd`) |
+| `--crawl` | follow links from each URL argument (off by default); requires `-d DIR` |
+| `--depth N` | how many links deep to follow (default 1; `--depth 0` is the seed only) |
+| `--max-pages N` | cap the total number of pages (default 200) |
+| `--crawl-delay D` | wait between requests to one host (default 500ms); no way to ask for none |
+| `--same-host=false` | allow the crawl to leave the seed's host (default: stay on it) |
+| `--include RE` / `--exclude RE` | repeatable regexps over the URL; `--exclude` wins |
+| `--ignore-robots` | do not read `robots.txt` — see [Crawling a site](#crawling-a-site) |
 | `--llm` | enable LLM image captioning — **off by default**, see [LLM features](#llm-features) |
 | `--llm-config PATH` | config file; default `~/.config/anymd/anymdconfig.json` |
 | `--llm-model NAME` | override the vision model from the config file |
@@ -118,8 +129,10 @@ anymd [flags] [file|url ...]
 | `--llm-transcribe` | also transcribe audio — a separate endpoint and a separate charge |
 | `--llm-transcribe-model NAME` | speech model (default `whisper-1`) |
 
-There are also `config` and `cache` subcommands: `anymd config path`, `anymd config show`,
-`anymd config init`. See [LLM features](#llm-features).
+There are also `config`, `cache` and `skills` subcommands: `anymd config path`,
+`anymd config show`, `anymd config init`; `anymd cache path|stats|clean`; and
+`anymd skills install|list|path|uninstall`. See [LLM features](#llm-features) and
+[Agent skill](#agent-skill).
 
 **Streams.** Markdown goes to **stdout**. Progress, warnings and errors go to
 **stderr**, always — they are never interleaved into stdout. That is what makes
@@ -241,6 +254,96 @@ ask for — is written down with what it costs in
 [ADR 0001](docs/adr/0001-pure-go-no-cgo-no-network.md). The rest of
 [`docs/adr/`](docs/adr/) covers the decisions whose result you can see in the
 code but whose reason you cannot.
+
+## Crawling a site
+
+`--crawl` follows links from a URL argument, converts every page, and writes the
+result as a directory of Markdown. It is **off by default**: without it, a URL
+argument is fetched once and nothing is followed.
+
+```sh
+anymd --crawl --depth 2 -d ./site https://example.dev/
+```
+
+```
+crawled 1 https://example.dev/
+crawled 2 https://example.dev/guide/
+crawled 3 https://example.dev/docs/deep/api.html
+crawl: fetched 3, written 3, skipped 1, failed 0
+```
+
+Output paths are derived from the URL — `/` becomes `index.md`, `/guide/` becomes
+`guide/index.md`, `/docs/deep/api.html` becomes `docs/deep/api.html.md`. The
+extension is *appended*, never substituted, so `/a.html` and `/a` cannot collide;
+anything a filename cannot express (a query string, a rewritten character, mixed
+case on a case-insensitive filesystem) gets an 8-hex suffix of the URL's SHA-256.
+`--crawl` writes many files, so it requires `-d DIR` and rejects `-o`.
+
+**Links are rewritten.** A link to a page that was crawled becomes a relative
+local path, so the directory browses offline; a link to a page that was *not*
+crawled stays absolute, so it still works; and a URL inside a fenced or indented
+code block is left alone, because that is content, not navigation.
+
+```markdown
+# API
+
+See the [home page](../../index.md) and the [spec](https://other.example/spec).
+```
+
+**Sitemaps.** Before following a link, the crawl looks for a sitemap — the
+`Sitemap:` directives in `robots.txt` first, then `/sitemap.xml`, then
+`/sitemap_index.xml`. Gzipped sitemaps and `<sitemapindex>` fan-out are handled.
+A sitemap is a **hint, not an authority**: its URLs enter the frontier at depth 0
+and still pass same-host, `--include`/`--exclude`, `robots.txt` and the page cap,
+and sitemap documents themselves are only ever fetched from the seed's own host.
+
+**Politeness.** `robots.txt` is respected by default and a `Crawl-delay` it asks
+for is honoured as a floor; there is a 500 ms inter-request delay per host that
+cannot be set to zero; the crawl stays on the seed's host unless you pass
+`--same-host=false`. `--ignore-robots` means fetching pages whose owner has
+published a machine-readable request that you not fetch them — that can get you
+blocked, and under some terms of service it is the difference between reading a
+site and breaching a contract. Crawling someone else's site has
+terms-of-service implications either way.
+
+Crawling lives in the separate `crawl` package, **outside the converter path** on
+purpose: a converter never touches the network, which is what makes anymd safe on
+untrusted input. Library users call `crawl.Crawl(ctx, seed, opts, visit)` and
+`crawl.LocalPath`, and rewrite with `anymd.RewriteLinks`.
+
+## Agent skill
+
+anymd ships a `SKILL.md` that tells an AI coding agent the tool exists and when to
+reach for it. Agents look in well-known directories, and this puts it there:
+
+```sh
+anymd skills install
+```
+
+```
+anymd: installed /Users/you/.claude/skills/anymd/SKILL.md
+anymd: installed /Users/you/.agents/skills/anymd/SKILL.md
+anymd: restart your agent if it caches its skill list
+```
+
+```sh
+anymd skills list       # per target: current / differs / not installed
+anymd skills path       # the target directories, one per line
+anymd skills uninstall  # remove only the files anymd installed
+```
+
+Targets are `~/.claude/skills/anymd` and `~/.agents/skills/anymd`, both by
+default; `--target claude|agents|all` picks among them, and `--dir PATH` installs
+into a skills root of your own (`anymd skills install --dir .claude/skills`).
+
+**Nothing is overwritten silently.** A byte-identical file is `already current`
+and exit 0; a file that differs is a refusal naming `--force` and exit 1.
+`uninstall` removes only the files anymd installed, keeps a file that differs
+without `--force`, and keeps the directory if anything anymd did not write is
+still in it.
+
+The skill is embedded with `go:embed`, so `anymd skills install` works from a
+bare `go install` with no repository checked out.
 
 ## LLM features
 
