@@ -448,7 +448,7 @@ func htmlRenderTable(ctx converter.Context, w converter.Writer, n *html.Node) co
 	}
 	if ctx.Value(htmlTableCtxKey{}) != nil {
 		// Nested table: flatten to its text, in document order.
-		w.WriteString(htmlTableFlatText(n))
+		_, _ = w.WriteString(htmlTableFlatText(n))
 		return converter.RenderSuccess
 	}
 
@@ -481,16 +481,16 @@ func htmlRenderTable(ctx converter.Context, w converter.Writer, n *html.Node) co
 		}
 	}
 
-	w.WriteString("\n\n")
+	_, _ = w.WriteString("\n\n")
 	if caption != "" {
-		w.WriteString(caption)
-		w.WriteString("\n\n")
+		_, _ = w.WriteString(caption)
+		_, _ = w.WriteString("\n\n")
 	}
 	// header is nil so mdutil.Table promotes the first row, which is what a
 	// GFM table requires and what docling's ground truth does for a table
 	// whose first row is <td> rather than <th>.
-	w.WriteString(mdutil.Table(nil, rows))
-	w.WriteString("\n\n")
+	_, _ = w.WriteString(mdutil.Table(nil, rows))
+	_, _ = w.WriteString("\n\n")
 	return converter.RenderSuccess
 }
 
@@ -507,9 +507,9 @@ func htmlRenderCaptionedImage(ctx converter.Context, w converter.Writer, n *html
 	if src == "" {
 		return converter.RenderSuccess
 	}
-	w.WriteString("![](")
-	w.WriteString(ctx.AssembleAbsoluteURL(ctx, "img", src))
-	w.WriteString(")")
+	_, _ = w.WriteString("![](")
+	_, _ = w.WriteString(ctx.AssembleAbsoluteURL(ctx, "img", src))
+	_, _ = w.WriteString(")")
 	return converter.RenderSuccess
 }
 

@@ -235,6 +235,11 @@ func cacheKeyWith(version string, content []byte, converter string, info StreamI
 	if o.MaxDepth >= 0 {
 		remaining = o.maxDepth() - o.depth
 	}
+	// Clamp before the cast: a negative remaining budget (depth past maxDepth)
+	// would wrap to a huge uint64 and give two different states the same key.
+	if remaining < 0 {
+		remaining = 0
+	}
 	var num [8]byte
 	binary.BigEndian.PutUint64(num[:], uint64(remaining))
 	field(h, 'd', num[:])
