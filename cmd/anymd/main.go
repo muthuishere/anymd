@@ -151,6 +151,7 @@ const usage = `anymd — convert any document to Markdown (pure Go, no cgo)
 
 usage: anymd [flags] [file|url ...]
        anymd config <path|show|init> [--llm-config FILE]
+       anymd cache  <path|stats|clean> [--cache-dir DIR]
 
   With no arguments (or "-") anymd reads stdin and writes Markdown to stdout.
   With a single input and no -o/-d it writes to stdout. Progress, warnings and
@@ -189,10 +190,16 @@ during conversion at all, which is what makes it safe on untrusted input):
   or ANTHROPIC_API_KEY), or from the config file via ${VAR} interpolation.
   anymd never prints a key, not even masked.
 
+` + "\n" + cacheFlagUsage + `
 config subcommand:
   anymd config path   print the config file path
   anymd config show   print the resolved config with every secret redacted
   anymd config init   write a starter config (mode 0600), never overwriting
+
+cache subcommand:
+  anymd cache path    print the cache directory
+  anymd cache stats   entry count and size on disk
+  anymd cache clean   remove cached entries (refuses paths outside the cache dir)
 
 exit codes: 0 all converted · 1 one or more failed · 2 usage error
 `

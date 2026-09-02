@@ -107,6 +107,9 @@ anymd [flags] [file|url ...]
 | `--insecure` | skip TLS verification when fetching a URL |
 | `--list` | print the registered converters in dispatch order |
 | `--version` | version, commit and Go version |
+| `--cache` | reuse a previous conversion of identical bytes (off by default) |
+| `--no-cache` | force a fresh conversion; wins over `--cache` |
+| `--cache-dir DIR` | cache location (default `os.UserCacheDir()/anymd`) |
 | `--llm` | enable LLM image captioning — **off by default**, see [LLM features](#llm-features) |
 | `--llm-config PATH` | config file; default `~/.config/anymd/anymdconfig.json` |
 | `--llm-model NAME` | override the vision model from the config file |
@@ -115,7 +118,7 @@ anymd [flags] [file|url ...]
 | `--llm-transcribe` | also transcribe audio — a separate endpoint and a separate charge |
 | `--llm-transcribe-model NAME` | speech model (default `whisper-1`) |
 
-There is also a `config` subcommand: `anymd config path`, `anymd config show`,
+There are also `config` and `cache` subcommands: `anymd config path`, `anymd config show`,
 `anymd config init`. See [LLM features](#llm-features).
 
 **Streams.** Markdown goes to **stdout**. Progress, warnings and errors go to
