@@ -120,6 +120,7 @@ anymd [flags] [file|url ...]
 | `--crawl-delay D` | wait between requests to one host (default 500ms); no way to ask for none |
 | `--same-host=false` | allow the crawl to leave the seed's host (default: stay on it) |
 | `--include RE` / `--exclude RE` | repeatable regexps over the URL; `--exclude` wins |
+| `--sitemap auto\|only\|off` | use a sitemap and follow links (default), sitemap only, or never look |
 | `--ignore-robots` | do not read `robots.txt` — see [Crawling a site](#crawling-a-site) |
 | `--llm` | enable LLM image captioning — **off by default**, see [LLM features](#llm-features) |
 | `--llm-config PATH` | config file; default `~/.config/anymd/anymdconfig.json` |

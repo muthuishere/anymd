@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/muthuishere/anymd/crawl"
 )
 
 // fakeSite serves a three-page site: an index and two pages under /docs that
@@ -289,5 +292,42 @@ func TestUniquePath(t *testing.T) {
 	}
 	if got := uniquePath(taken, "docs/a.md", "https://x.dev/other", ".md"); got != "docs/a-2.md" {
 		t.Errorf("a colliding URL should be suffixed, got %q", got)
+	}
+}
+
+func TestParseSitemapMode(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    crawl.SitemapMode
+		wantErr bool
+	}{
+		{"auto", crawl.SitemapAuto, false},
+		{"only", crawl.SitemapOnly, false},
+		{"off", crawl.SitemapOff, false},
+		{"", 0, true},     // an empty value must not silently mean the default
+		{"AUTO", 0, true}, // no case folding: be strict about a small vocabulary
+		{"bogus", 0, true},
+	} {
+		got, err := parseSitemapMode(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("parseSitemapMode(%q) = %v, want an error", tc.in, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("parseSitemapMode(%q) = %v, %v; want %v, nil", tc.in, got, err, tc.want)
+		}
+	}
+}
+
+// --sitemap without --crawl must be a usage error, like every other crawl flag.
+func TestSitemapFlagRequiresCrawl(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--sitemap", "off", "https://example.invalid/"}, &out, &errOut); code != exitUsage {
+		t.Fatalf("exit = %d, want %d; stderr = %q", code, exitUsage, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "--sitemap requires --crawl") {
+		t.Errorf("stderr = %q", errOut.String())
 	}
 }

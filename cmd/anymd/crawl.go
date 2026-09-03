@@ -49,6 +49,7 @@ type crawlOptions struct {
 	delay        time.Duration
 	sameHost     bool
 	ignoreRobots bool
+	sitemap      string
 	include      stringList
 	exclude      stringList
 }
@@ -56,7 +57,7 @@ type crawlOptions struct {
 // crawlFlagNames are the flags that only mean something with --crawl. Silently
 // ignoring one of these is how somebody spends an afternoon wondering why
 // --depth 3 fetched a single page.
-var crawlFlagNames = []string{"depth", "max-pages", "crawl-delay", "same-host", "include", "exclude", "ignore-robots"}
+var crawlFlagNames = []string{"depth", "max-pages", "crawl-delay", "same-host", "include", "exclude", "ignore-robots", "sitemap"}
 
 // stringList collects a repeatable flag.
 type stringList []string
@@ -76,6 +77,24 @@ func registerCrawlFlags(fs *flag.FlagSet, co *crawlOptions) {
 	fs.BoolVar(&co.ignoreRobots, "ignore-robots", false, "")
 	fs.Var(&co.include, "include", "")
 	fs.Var(&co.exclude, "exclude", "")
+	fs.StringVar(&co.sitemap, "sitemap", "auto", "")
+}
+
+// parseSitemapMode maps the --sitemap value onto crawl.SitemapMode.
+//
+// The default is "auto" rather than a bare empty string so that `--sitemap ""`
+// is an error a user can understand instead of silently meaning the default.
+func parseSitemapMode(v string) (crawl.SitemapMode, error) {
+	switch v {
+	case "auto":
+		return crawl.SitemapAuto, nil
+	case "only":
+		return crawl.SitemapOnly, nil
+	case "off":
+		return crawl.SitemapOff, nil
+	default:
+		return 0, fmt.Errorf("--sitemap %q: want auto, only or off", v)
+	}
 }
 
 // crawlFlagUsage is the block spliced into the main usage text. It is spliced
@@ -95,6 +114,9 @@ and nothing is followed):
       --include RE   only crawl URLs matching this regexp (repeatable)
       --exclude RE   never crawl URLs matching this regexp (repeatable,
                      and it wins over --include)
+      --sitemap M    auto (default) | only | off — auto seeds the crawl from a
+                     sitemap when one exists AND still follows links; only
+                     skips link following; off never looks for one
       --ignore-robots  do not read robots.txt (say why to yourself first)
 
   Each page is converted, its output path derived from its URL, and its links
@@ -188,7 +210,14 @@ func runCrawl(engine *anymd.Engine, cfg *config, opts *anymd.Options, stderr io.
 		return exitFail
 	}
 
+	sitemapMode, err := parseSitemapMode(cfg.crawl.sitemap)
+	if err != nil {
+		fmt.Fprintf(stderr, "anymd: %v\n", err)
+		return exitUsage
+	}
+
 	copts := crawl.Options{
+		Sitemap:      sitemapMode,
 		MaxDepth:     cfg.crawl.depth,
 		MaxPages:     cfg.crawl.maxPages,
 		Delay:        cfg.crawl.delay,

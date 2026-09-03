@@ -174,17 +174,19 @@ live sitemaps declare it wrong, declare a different one, or declare none at all.
 
 ### The three modes
 
-<Aside type="note" title="There is no CLI flag for this yet">
-`--help` lists no sitemap flag, so the CLI always runs in the default mode,
-`SitemapAuto`. Choosing `SitemapOnly` or `SitemapOff` is a library-only decision
-today, via `crawl.Options.Sitemap`.
-</Aside>
+Pick one with `--sitemap auto|only|off` on the CLI, or `crawl.Options.Sitemap`
+in the library. The CLI names map onto the constants below.
 
-| Mode | Behaviour |
-|---|---|
-| `SitemapAuto` *(zero value, the default)* | Use a sitemap when one is found **and** still follow links. Finds pages the seed does not link to, in one request instead of a walk. |
-| `SitemapOnly` | Fetch the seed plus the URLs a sitemap lists, and follow no links at all. For a large site whose sitemap is authoritative. With no sitemap this fetches the seed and nothing else — not an error, just what "only the sitemap" means when there is no sitemap. |
-| `SitemapOff` | Never fetch a sitemap. Discover pages by following links, exactly as anymd did before sitemaps existed. |
+```sh
+anymd --crawl --sitemap only -d ./site https://example.dev   # sitemap is authoritative
+anymd --crawl --sitemap off  -d ./site https://example.dev   # follow links only
+```
+
+| Mode | CLI | Behaviour |
+|---|---|---|
+| `SitemapAuto` *(zero value, the default)* | `auto` | Use a sitemap when one is found **and** still follow links. Finds pages the seed does not link to, in one request instead of a walk. |
+| `SitemapOnly` | `only` | Fetch the seed plus the URLs a sitemap lists, and follow no links at all. For a large site whose sitemap is authoritative. With no sitemap this fetches the seed and nothing else — not an error, just what "only the sitemap" means when there is no sitemap. |
+| `SitemapOff` | `off` | Never fetch a sitemap. Discover pages by following links, exactly as anymd did before sitemaps existed. |
 
 `crawl.Result` splits the count by how each page was **discovered**:
 `FromSitemap`, `FromLinks`, and `Sitemaps` — the sitemap documents actually
