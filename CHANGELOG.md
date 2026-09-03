@@ -12,7 +12,47 @@ treated as stable from `0.1.0` onward.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-03
+
 ### Added
+
+- **Site crawling.** `anymd --crawl --depth 2 -d ./site https://example.dev`
+  follows links to a bounded depth, converts each page, and **rewrites internal
+  links to the local files** — a mirror whose links still point at the internet
+  is not a mirror. A link to a page that was not crawled stays absolute so it
+  still works, and a URL inside a fenced code block is left alone, because that
+  is content rather than navigation.
+
+  Flags: `--crawl --depth --max-pages --crawl-delay --same-host --include
+  --exclude --ignore-robots --sitemap`. Politeness is not optional: robots.txt
+  is respected by default with `Crawl-delay` honoured, there is a default
+  inter-request delay, and the crawl is same-host unless told otherwise.
+
+  Crawling lives in its own `crawl` package and is unreachable from a
+  converter. The guarantee that a converter never touches the network is what
+  makes anymd safe to point at untrusted input, so crawling is something a
+  caller opts into, never something a conversion can trigger.
+
+- **Sitemap discovery** (`--sitemap auto|only|off`, `crawl.Options.Sitemap`).
+  Found via robots.txt `Sitemap:` directives, then `/sitemap.xml`, then
+  `/sitemap_index.xml`; handles gzipped sitemaps and sitemap-index fan-out,
+  both bounded. Default `auto` seeds the crawl from a sitemap **and** still
+  follows links, so it finds pages the seed does not link to. A sitemap is a
+  hint, not an authority: its URLs still pass same-host, include/exclude,
+  robots.txt and the page cap.
+
+- **`anymd skills install | list | path | uninstall`.** Installs the bundled
+  agent skill to `~/.claude/skills/anymd` and `~/.agents/skills/anymd`, so an
+  AI coding agent can find it. Embedded with `go:embed`, so it works from a
+  bare `go install` with no checkout, and there is exactly one canonical
+  `SKILL.md` that cannot drift. It never overwrites silently: identical is
+  "already current", modified is a refusal naming `--force`. `uninstall`
+  removes only what it installed and keeps a directory holding any foreign file.
+
+- **Flags may follow filenames.** `anymd report.docx -o report.md` — the form
+  markitdown's own help documents — used to fail with "stat -o: no such file or
+  directory", because Go's flag package stops at the first positional. Python's
+  argparse and GNU getopt both permute; Go is the outlier.
 
 - **Optional LLM features — off by default.** anymd can now read what it
   previously could only skip, when the caller explicitly supplies a model.
