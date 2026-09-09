@@ -1,0 +1,9 @@
+{
+  "name": "anymd",
+  "modules": [
+    {
+      "path": "site"
+    }
+  ],
+  "wiki": false
+}
