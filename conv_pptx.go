@@ -53,6 +53,9 @@ func (c *PptxConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options)
 	// that appears on all 60 slides cost exactly one model call, and its call
 	// counter is what bounds a large deck.
 	captioner := newOOXMLCaptioner(pkg, opts)
+	// One budget for the deck, so a logo repeated on sixty slides is encoded
+	// once and charged once.
+	images := newImageBudget(opts)
 
 	var blocks []string
 	for i, part := range slides {
@@ -64,7 +67,7 @@ func (c *PptxConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options)
 		// in the file name: a deleted slide leaves a gap in slideN.xml but not
 		// in what a reader sees.
 		blocks = append(blocks, mdutil.Heading(2, "Slide "+strconv.Itoa(i+1)))
-		body, err := pptxSlideBlocks(data, pkg, part, captioner)
+		body, err := pptxSlideBlocks(data, pkg, part, captioner, images)
 		if err != nil {
 			return Result{}, fmt.Errorf("pptx: %s: %w", part, err)
 		}
@@ -125,7 +128,7 @@ func pptxSlideParts(names []string) []string {
 // pkg and slidePart are needed because neither a chart nor a picture is inline:
 // the slide carries only an r:id that has to be resolved through the slide's
 // relationships. captioner is nil unless the caller supplied a Describer.
-func pptxSlideBlocks(data []byte, pkg *ooxml.Package, slidePart string, captioner *ooxmlCaptioner) ([]string, error) {
+func pptxSlideBlocks(data []byte, pkg *ooxml.Package, slidePart string, captioner *ooxmlCaptioner, images *imageBudget) ([]string, error) {
 	d := ooxml.NewDecoder(data)
 	rels := pkg.RelTargets(slidePart)
 	var blocks []string
@@ -143,18 +146,31 @@ func pptxSlideBlocks(data []byte, pkg *ooxml.Package, slidePart string, captione
 		}
 		switch se.Name.Local {
 		case "sp":
-			title, paras, err := pptxShape(d)
+			title, plain, paras, err := pptxShape(d)
 			if err != nil {
 				return nil, err
 			}
+			// Body text on a slide is a bulleted list. PowerPoint does not
+			// write the bullet into the slide — it inherits from the layout —
+			// so a converter that waits to be told emits the whole outline as
+			// loose paragraphs and loses both the list and the nesting that
+			// a:pPr lvl records. The shape's items are emitted as one block so
+			// the list stays tight.
+			var items []string
 			for _, p := range paras {
-				if title {
-					if h := mdutil.Heading(3, p); h != "" {
+				switch {
+				case title:
+					if h := mdutil.Heading(3, p.text); h != "" {
 						blocks = append(blocks, h)
 					}
-					continue
+				case plain:
+					blocks = append(blocks, p.text)
+				default:
+					items = append(items, strings.Repeat("    ", p.lvl)+"- "+p.text)
 				}
-				blocks = append(blocks, p)
+			}
+			if len(items) > 0 {
+				blocks = append(blocks, strings.Join(items, "\n"))
 			}
 		case "tbl":
 			rows, err := pptxTable(d)
@@ -175,11 +191,10 @@ func pptxSlideBlocks(data []byte, pkg *ooxml.Package, slidePart string, captione
 			// its own paragraph — the way conv_image.go renders a described
 			// image — rather than being stuffed into the alt-text brackets.
 			caption := captioner.caption(slidePart, embed, alt)
-			if alt != "" || caption != "" {
-				// No destination: the media part is not inlined, but the
-				// authored description is often the only prose describing the
-				// figure, so losing it loses real content.
-				blocks = append(blocks, "!["+alt+"]()")
+			b, mime := captioner.media(slidePart, embed)
+			uri := images.dataURI(b, mime)
+			if alt != "" || caption != "" || uri != "" {
+				blocks = append(blocks, markdownImage(alt, uri))
 			}
 			if caption != "" {
 				blocks = append(blocks, caption)
@@ -197,13 +212,15 @@ func pptxSlideBlocks(data []byte, pkg *ooxml.Package, slidePart string, captione
 	return blocks, nil
 }
 
+// pptxPara is one slide paragraph: its text and its outline level.
+type pptxPara struct {
+	text string
+	lvl  int
+}
+
 // pptxShape consumes one p:sp, reporting whether it is a title placeholder and
 // returning its non-empty paragraphs.
-func pptxShape(d *xml.Decoder) (bool, []string, error) {
-	var (
-		title bool
-		paras []string
-	)
+func pptxShape(d *xml.Decoder) (title, plain bool, paras []pptxPara, err error) {
 	depth := 1
 	for depth > 0 {
 		tok, err := d.Token()
@@ -211,7 +228,7 @@ func pptxShape(d *xml.Decoder) (bool, []string, error) {
 			break
 		}
 		if err != nil {
-			return false, nil, err
+			return false, false, nil, err
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
@@ -220,21 +237,25 @@ func pptxShape(d *xml.Decoder) (bool, []string, error) {
 				switch strings.ToLower(ooxml.Attr(t, "type")) {
 				case "title", "ctrtitle":
 					title = true
+				case "subtitle":
+					// A subtitle is a caption for the title, not an outline
+					// level, so it stays prose.
+					plain = true
 				}
 				if err := ooxml.SkipElement(d); err != nil {
 					if err == io.EOF {
 						depth = 0
 						continue
 					}
-					return false, nil, err
+					return false, false, nil, err
 				}
 			case "p":
-				s, err := pptxParagraph(d)
+				s, lvl, err := pptxParagraph(d)
 				if err != nil {
-					return false, nil, err
+					return false, false, nil, err
 				}
 				if s != "" {
-					paras = append(paras, s)
+					paras = append(paras, pptxPara{text: s, lvl: lvl})
 				}
 			default:
 				depth++
@@ -243,13 +264,14 @@ func pptxShape(d *xml.Decoder) (bool, []string, error) {
 			depth--
 		}
 	}
-	return title, paras, nil
+	return title, plain, paras, nil
 }
 
 // pptxParagraph consumes one a:p and returns its collapsed text. a:br becomes a
 // space, because a soft break inside a slide bullet is not a Markdown block.
-func pptxParagraph(d *xml.Decoder) (string, error) {
+func pptxParagraph(d *xml.Decoder) (string, int, error) {
 	var sb strings.Builder
+	lvl := 0
 	depth := 1
 	for depth > 0 {
 		tok, err := d.Token()
@@ -257,15 +279,25 @@ func pptxParagraph(d *xml.Decoder) (string, error) {
 			break
 		}
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
 			switch t.Name.Local {
+			case "pPr":
+				// a:pPr lvl is the outline depth, and the only record the file
+				// keeps of a sub-bullet.
+				if n, err := strconv.Atoi(strings.TrimSpace(ooxml.Attr(t, "lvl"))); err == nil && n > 0 {
+					if n > 8 {
+						n = 8
+					}
+					lvl = n
+				}
+				depth++
 			case "t":
 				s, err := ooxml.TextOf(d)
 				if err != nil {
-					return "", err
+					return "", 0, err
 				}
 				sb.WriteString(s)
 			case "br":
@@ -274,7 +306,7 @@ func pptxParagraph(d *xml.Decoder) (string, error) {
 						depth = 0
 						continue
 					}
-					return "", err
+					return "", 0, err
 				}
 				sb.WriteString(" ")
 			default:
@@ -284,7 +316,7 @@ func pptxParagraph(d *xml.Decoder) (string, error) {
 			depth--
 		}
 	}
-	return mdutil.Collapse(sb.String()), nil
+	return mdutil.Collapse(sb.String()), lvl, nil
 }
 
 // pptxTable consumes one a:tbl and returns its cells as a rectangular grid.
@@ -382,7 +414,7 @@ func pptxTableCell(d *xml.Decoder) (string, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if t.Name.Local == "p" {
-				s, err := pptxParagraph(d)
+				s, _, err := pptxParagraph(d)
 				if err != nil {
 					return "", err
 				}
@@ -504,7 +536,7 @@ func pptxNotesShape(d *xml.Decoder) (string, []string, error) {
 					return "", nil, err
 				}
 			case "p":
-				s, err := pptxParagraph(d)
+				s, _, err := pptxParagraph(d)
 				if err != nil {
 					return "", nil, err
 				}

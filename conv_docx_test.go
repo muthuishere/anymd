@@ -369,9 +369,14 @@ func TestDocxImageCaptionedWithHint(t *testing.T) {
 	})
 
 	got := convertDocxWith(t, fixture, &Options{Describer: stub})
-	want := "Figure 1.\n\n![Revenue chart]()\n\nA bar chart of quarterly revenue.\n"
-	if got.Markdown != want {
-		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	// The image is inlined and the caption follows it as its own block. The
+	// payload is checked by shape rather than by equality, so the assertion
+	// stays readable.
+	if !strings.HasPrefix(got.Markdown, "Figure 1.\n\n![Revenue chart](data:image/png;base64,") {
+		t.Errorf("image or alt text wrong\n got: %.100q", got.Markdown)
+	}
+	if !strings.HasSuffix(got.Markdown, ")\n\nA bar chart of quarterly revenue.\n") {
+		t.Errorf("caption not emitted after the image\n got: %.100q", got.Markdown[max(0, len(got.Markdown)-80):])
 	}
 	if len(stub.calls) != 1 {
 		t.Fatalf("describer calls = %d, want 1", len(stub.calls))
@@ -389,20 +394,28 @@ func TestDocxImageCaptionedWithHint(t *testing.T) {
 
 // The default — no Describer — must read no media at all and emit exactly what
 // it emitted before captioning existed.
-func TestDocxNoDescriberIsUnchangedAndReadsNoMedia(t *testing.T) {
+// TestDocxImageInlinedWithoutDescriber pins that the picture travels with the
+// text whether or not a model is configured. Captioning needs a Describer;
+// carrying the image does not.
+func TestDocxImageInlinedWithoutDescriber(t *testing.T) {
 	body := `<w:p><w:r>` + docxDrawingXML("Revenue chart", "rId3") + `</w:r></w:p>`
 	fixture := docxFixture(t, body, map[string]string{
 		"word/_rels/document.xml.rels": docxImageRels("image1.png"),
 		"word/media/image1.png":        ooxmlPixels(6000, 1),
 	})
 
-	want := "![Revenue chart]()\n"
-	if got := convertDocx(t, fixture); got.Markdown != want {
-		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+	const want = "![Revenue chart](data:image/png;base64,"
+	if got := convertDocx(t, fixture); !strings.HasPrefix(got.Markdown, want) {
+		t.Errorf("image not inlined\n got: %.100q\nwant prefix: %q", got.Markdown, want)
 	}
 	// An Options with no Describer is the same path, explicitly.
-	if got := convertDocxWith(t, fixture, &Options{}); got.Markdown != want {
-		t.Errorf("markdown mismatch with empty Options\n got: %q\nwant: %q", got.Markdown, want)
+	if got := convertDocxWith(t, fixture, &Options{}); !strings.HasPrefix(got.Markdown, want) {
+		t.Errorf("image not inlined with empty Options\n got: %.100q\nwant prefix: %q", got.Markdown, want)
+	}
+	// DropImages is how a caller opts out, and then the placeholder is all
+	// that is left.
+	if got := convertDocxWith(t, fixture, &Options{DropImages: true}); got.Markdown != "![Revenue chart]()\n" {
+		t.Errorf("DropImages did not drop the payload\n got: %.100q", got.Markdown)
 	}
 }
 
@@ -422,8 +435,13 @@ func TestDocxDescriberFailureDegradesToAltText(t *testing.T) {
 				"word/media/image1.png":        ooxmlPixels(6000, 1),
 			})
 			got := convertDocxWith(t, fixture, &Options{Describer: tc.stub})
-			if want := "![Revenue chart]()\n"; got.Markdown != want {
-				t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+			// No caption, but the picture itself still arrives: a model
+			// outage costs the description, never the content.
+			if !strings.HasPrefix(got.Markdown, "![Revenue chart](data:image/png;base64,") {
+				t.Errorf("image lost when the describer failed\n got: %.100q", got.Markdown)
+			}
+			if strings.Count(got.Markdown, "\n\n") != 0 {
+				t.Errorf("a caption block was emitted anyway\n got: %.100q", got.Markdown)
 			}
 			if len(tc.stub.calls) != 1 {
 				t.Errorf("describer calls = %d, want 1", len(tc.stub.calls))
@@ -433,13 +451,12 @@ func TestDocxDescriberFailureDegradesToAltText(t *testing.T) {
 }
 
 // Spacers, bullet glyphs and vector drawings are not worth a round trip.
-func TestDocxSkipsTinyAndVectorImages(t *testing.T) {
+func TestDocxSkipsVectorImages(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		part  string
 		bytes int
 	}{
-		{"below the size floor", "image1.png", ooxmlMinCaptionBytes - 1},
 		{"emf is vector", "image1.emf", 20000},
 		{"wmf is vector", "image1.wmf", 20000},
 		{"svg is vector", "image1.svg", 20000},
@@ -452,8 +469,10 @@ func TestDocxSkipsTinyAndVectorImages(t *testing.T) {
 				"word/media/" + tc.part:        ooxmlPixels(tc.bytes, 2),
 			})
 			got := convertDocxWith(t, fixture, &Options{Describer: stub})
+			// A vector part has no raster media type, so there is nothing to
+			// caption and nothing a data: URI could usefully carry.
 			if want := "![Logo]()\n"; got.Markdown != want {
-				t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
+				t.Errorf("markdown mismatch\n got: %.100q\nwant: %q", got.Markdown, want)
 			}
 			if len(stub.calls) != 0 {
 				t.Errorf("describer called %d times, want 0", len(stub.calls))
@@ -473,8 +492,10 @@ func TestDocxTableImageIsNotCaptioned(t *testing.T) {
 		"word/media/image1.png":        ooxmlPixels(6000, 3),
 	})
 	got := convertDocxWith(t, fixture, &Options{Describer: stub})
-	if !strings.Contains(got.Markdown, "Cell![Logo]()") {
-		t.Errorf("table cell lost its image: %q", got.Markdown)
+	// The image is inlined like any other; what a table suppresses is the
+	// model call, not the picture.
+	if !strings.Contains(got.Markdown, "Cell![Logo](data:image/png;base64,") {
+		t.Errorf("table cell lost its image: %.120q", got.Markdown)
 	}
 	if len(stub.calls) != 0 {
 		t.Errorf("describer called %d times inside a table, want 0", len(stub.calls))

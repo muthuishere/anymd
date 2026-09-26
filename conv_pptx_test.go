@@ -116,7 +116,7 @@ func TestPptxSlideOrderingPastNine(t *testing.T) {
 		}
 		fmt.Fprintf(&want, "## Slide %d\n\n### Title %d\n", i, i)
 	}
-	if got.Markdown != want.String() {
+	if stripDataURIs(got.Markdown) != want.String() {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want.String())
 	}
 }
@@ -158,8 +158,10 @@ func TestPptxTitleBodyTableAndNotes(t *testing.T) {
 	got := convertPptx(t, b)
 	want := "## Slide 1\n\n" +
 		"### Quarterly Review\n\n" +
-		"Revenue is up\n\n" +
-		"Costs are flat\n\n" +
+		// Body placeholder text is the slide's outline, so it comes out as
+		// one tight bulleted list.
+		"- Revenue is up\n" +
+		"- Costs are flat\n\n" +
 		"| Region | Q1 | Q2 |\n" +
 		"| --- | --- | --- |\n" +
 		"| North | 10 | 12 |\n" +
@@ -167,7 +169,7 @@ func TestPptxTitleBodyTableAndNotes(t *testing.T) {
 		"> **Notes:** Open with the revenue chart.\n" +
 		">\n" +
 		"> Then hand over to Sam.\n"
-	if got.Markdown != want {
+	if stripDataURIs(got.Markdown) != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
 	}
 }
@@ -181,7 +183,7 @@ func TestPptxNotesFoundByConventionAndSkippedWhenEmpty(t *testing.T) {
 	want := "## Slide 1\n\n### Title 1\n\n" +
 		"## Slide 2\n\n### Title 2\n\n" +
 		"> **Notes:** Only slide two has notes.\n"
-	if got.Markdown != want {
+	if stripDataURIs(got.Markdown) != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
 	}
 }
@@ -232,7 +234,7 @@ func TestPptxPictureAltText(t *testing.T) {
 		"### Figures\n\n" +
 		"![The first page of the paper . 44bf7d06]()\n\n" +
 		"![Picture 9]()\n"
-	if got.Markdown != want {
+	if stripDataURIs(got.Markdown) != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
 	}
 }
@@ -294,7 +296,7 @@ func TestPptxChartTitleAndSeriesTable(t *testing.T) {
 		"| 2001 | 10 | 1 |\n" +
 		"| 2002 |  | 2 |\n" +
 		"| 2003 | 30 | 3 |\n"
-	if got.Markdown != want {
+	if stripDataURIs(got.Markdown) != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
 	}
 }
@@ -337,7 +339,7 @@ func TestPptxChartWithoutCacheKeepsTitle(t *testing.T) {
 		"ppt/charts/chart1.xml":            bare,
 	}))
 	want := "## Slide 1\n\n### A chart\n\n### Chart: Bare\n"
-	if got.Markdown != want {
+	if stripDataURIs(got.Markdown) != want {
 		t.Errorf("got %q, want %q", got.Markdown, want)
 	}
 }
@@ -356,7 +358,7 @@ func TestPptxChartHugePointIndexIsIgnored(t *testing.T) {
 		"ppt/charts/chart1.xml":            evil,
 	}))
 	want := "## Slide 1\n\n### A chart\n\n### Chart\n\n| Category | S |\n| --- | --- |\n|  | 1 |\n"
-	if got.Markdown != want {
+	if stripDataURIs(got.Markdown) != want {
 		t.Errorf("got %q, want %q", got.Markdown, want)
 	}
 }
@@ -411,8 +413,8 @@ func TestPptxPictureCaptionedWithHint(t *testing.T) {
 	})
 
 	got := convertPptxWith(t, fixture, &Options{Describer: stub})
-	want := "## Slide 1\n\n### Figures\n\n![Team photo]()\n\nTwo engineers at a whiteboard.\n"
-	if got.Markdown != want {
+	want := "## Slide 1\n\n### Figures\n\n![Team photo](data:…)\n\nTwo engineers at a whiteboard.\n"
+	if stripDataURIs(got.Markdown) != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
 	}
 	if len(stub.calls) != 1 || stub.calls[0].hint != "Team photo" {
@@ -421,7 +423,7 @@ func TestPptxPictureCaptionedWithHint(t *testing.T) {
 
 	// The same deck with no Describer is byte-identical to what it always was.
 	plain := convertPptx(t, fixture)
-	if wantPlain := "## Slide 1\n\n### Figures\n\n![Team photo]()\n"; plain.Markdown != wantPlain {
+	if wantPlain := "## Slide 1\n\n### Figures\n\n![Team photo](data:…)\n"; stripDataURIs(plain.Markdown) != wantPlain {
 		t.Errorf("no-describer markdown changed\n got: %q\nwant: %q", plain.Markdown, wantPlain)
 	}
 }
@@ -440,10 +442,10 @@ func TestPptxCaptionDedupsIdenticalImages(t *testing.T) {
 	}
 
 	got := convertPptxWith(t, pptxFixture(t, 3, parts), &Options{Describer: stub})
-	want := "## Slide 1\n\n![Logo]()\n\nThe company logo.\n\n" +
-		"## Slide 2\n\n![Logo]()\n\nThe company logo.\n\n" +
-		"## Slide 3\n\n![Logo]()\n\nThe company logo.\n"
-	if got.Markdown != want {
+	want := "## Slide 1\n\n![Logo](data:…)\n\nThe company logo.\n\n" +
+		"## Slide 2\n\n![Logo](data:…)\n\nThe company logo.\n\n" +
+		"## Slide 3\n\n![Logo](data:…)\n\nThe company logo.\n"
+	if stripDataURIs(got.Markdown) != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
 	}
 	if len(stub.calls) != 1 {
@@ -501,7 +503,7 @@ func TestPptxUnresolvableImageIsNotCaptioned(t *testing.T) {
 
 	got := convertPptxWith(t, fixture, &Options{Describer: stub})
 	want := "## Slide 1\n\n![Dangling]()\n\n![Missing part]()\n"
-	if got.Markdown != want {
+	if stripDataURIs(got.Markdown) != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
 	}
 	if len(stub.calls) != 0 {
@@ -524,12 +526,14 @@ func TestPptxUndescribedImageGainsCaptionOnly(t *testing.T) {
 		"ppt/media/image1.png":             ooxmlPixels(9000, 11),
 	})
 
-	if got := convertPptx(t, fixture); got.Markdown != "## Slide 1\n" {
-		t.Errorf("no-describer markdown changed: %q", got.Markdown)
+	// With no alt text and no model there is nothing to say about the
+	// picture, but the picture itself is still content and still travels.
+	if got := convertPptx(t, fixture); stripDataURIs(got.Markdown) != "## Slide 1\n\n![](data:…)\n" {
+		t.Errorf("no-describer markdown changed: %.100q", got.Markdown)
 	}
 	got := convertPptxWith(t, fixture, &Options{Describer: stub})
-	want := "## Slide 1\n\n![]()\n\nA screenshot of the dashboard.\n"
-	if got.Markdown != want {
+	want := "## Slide 1\n\n![](data:…)\n\nA screenshot of the dashboard.\n"
+	if stripDataURIs(got.Markdown) != want {
 		t.Errorf("markdown mismatch\n got: %q\nwant: %q", got.Markdown, want)
 	}
 	if len(stub.calls) != 1 || stub.calls[0].hint != "" {

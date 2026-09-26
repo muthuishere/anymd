@@ -66,6 +66,7 @@ func (c *DocxConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options)
 		rels:      pkg.RelTargets(docxDocumentPart),
 		numbered:  docxNumberFormats(pkg.OptionalPart(docxNumberingPar)),
 		captioner: newOOXMLCaptioner(pkg, opts),
+		images:    newImageBudget(opts),
 	}
 	blocks, err := dc.document(data)
 	if err != nil {
@@ -86,6 +87,8 @@ type docxCtx struct {
 	// captioner is nil unless the caller supplied a Describer; see
 	// ooxmlCaptioner for why nil is the interesting case.
 	captioner *ooxmlCaptioner
+	// images meters the bytes this document may inline as data: URIs.
+	images *imageBudget
 
 	// pending holds captions produced while walking the current paragraph.
 	// An image lives *inline* in a w:p, but its description is prose and
@@ -141,15 +144,15 @@ func (dc *docxCtx) image(alt, embedID string) (docxSeg, bool) {
 	if !dc.inTable {
 		caption = dc.captioner.caption(docxDocumentPart, embedID, alt)
 	}
-	if caption == "" && alt == "" {
+	b, mime := dc.captioner.media(docxDocumentPart, embedID)
+	uri := dc.images.dataURI(b, mime)
+	if caption == "" && alt == "" && uri == "" {
 		return docxSeg{}, false
 	}
 	if caption != "" {
 		dc.pending = append(dc.pending, caption)
 	}
-	// Rendered without a destination: the media part is not inlined, but the
-	// authored description is often the only prose describing the figure.
-	return docxSeg{raw: "![" + alt + "]()"}, true
+	return docxSeg{raw: markdownImage(alt, uri)}, true
 }
 
 // docxSeg is one stretch of inline content. raw is set for content that is
@@ -168,6 +171,9 @@ type docxPara struct {
 	list  bool
 	ilvl  int
 	numID string
+	// styleOrdered records that the list kind came from the paragraph style
+	// rather than from numbering.xml, which has no entry for this paragraph.
+	styleOrdered bool
 }
 
 // document walks word/document.xml and returns the top-level Markdown blocks.
@@ -389,7 +395,7 @@ func (dc *docxCtx) listItem(p docxPara, counters *[]int) string {
 		lvl = 8
 	}
 	marker := "- "
-	if dc.ordered(p.numID, lvl) {
+	if p.styleOrdered || dc.ordered(p.numID, lvl) {
 		c := *counters
 		for len(c) <= lvl {
 			c = append(c, 0)
@@ -518,7 +524,43 @@ func (dc *docxCtx) paraProps(d *xml.Decoder, p *docxPara) error {
 	if p.numID == "0" {
 		p.list = false
 	}
+	// A paragraph can also be a list item purely by style, with no w:numPr of
+	// its own: the numbering hangs off the style definition instead. Word
+	// itself writes w:numPr, which is why this went unnoticed, but the
+	// python-docx and LibreOffice paths that produce "List Bullet" and "List
+	// Number" paragraphs do not — and their lists were arriving as a run of
+	// unmarked paragraphs with the list lost entirely.
+	if !p.list {
+		if lvl, ordered, ok := docxListStyle(p.style); ok {
+			p.list = true
+			p.ilvl = lvl
+			p.styleOrdered = ordered
+		}
+	}
 	return nil
+}
+
+// docxListStyle reads a list style name: its kind, and the nesting level the
+// trailing digit encodes ("ListBullet2" is one level in).
+func docxListStyle(style string) (lvl int, ordered, ok bool) {
+	s := strings.ToLower(strings.Join(strings.Fields(style), ""))
+	switch {
+	case strings.HasPrefix(s, "listnumber"):
+		s, ordered, ok = strings.TrimPrefix(s, "listnumber"), true, true
+	case strings.HasPrefix(s, "listbullet"):
+		s, ok = strings.TrimPrefix(s, "listbullet"), true
+	case strings.HasPrefix(s, "listparagraph"):
+		// The catch-all style Word applies to list items whose numbering lives
+		// elsewhere. Without a w:numPr there is nothing to say it is ordered,
+		// so it renders as a bullet.
+		s, ok = strings.TrimPrefix(s, "listparagraph"), true
+	default:
+		return 0, false, false
+	}
+	if n, err := strconv.Atoi(s); err == nil && n > 1 {
+		lvl = n - 1
+	}
+	return lvl, ordered, ok
 }
 
 // run consumes one w:r and returns its content as segments.
@@ -1272,7 +1314,7 @@ type ooxmlCaptioner struct {
 // newOOXMLCaptioner returns nil when the caller supplied no Describer, which is
 // the default and the only mode in which anymd makes no network calls.
 func newOOXMLCaptioner(pkg *ooxml.Package, opts *Options) *ooxmlCaptioner {
-	if pkg == nil || !opts.HasDescriber() {
+	if pkg == nil {
 		return nil
 	}
 	return &ooxmlCaptioner{
@@ -1290,9 +1332,16 @@ func newOOXMLCaptioner(pkg *ooxml.Package, opts *Options) *ooxmlCaptioner {
 // the size floor, the per-document cap, or a Describer error — because the
 // caller's fallback in all of those cases is identical: emit what it emits
 // today.
-func (c *ooxmlCaptioner) caption(sourcePart, embedID, hint string) string {
+// media resolves a relationship id to the image bytes it points at, with the
+// media type read off the part name.
+//
+// It is separate from captioning because the bytes are wanted in two unrelated
+// cases — describing an image and inlining it — and only one of them needs a
+// model. Tying the lookup to the captioner made the bytes unreachable whenever
+// no Describer was configured, which is the common case.
+func (c *ooxmlCaptioner) media(sourcePart, embedID string) ([]byte, string) {
 	if c == nil || embedID == "" {
-		return ""
+		return nil, ""
 	}
 	rels, ok := c.rels[sourcePart]
 	if !ok {
@@ -1301,17 +1350,27 @@ func (c *ooxmlCaptioner) caption(sourcePart, embedID, hint string) string {
 	}
 	part := ooxml.ResolveTarget(sourcePart, rels[embedID])
 	if part == "" || !c.pkg.Has(part) {
-		return ""
+		return nil, ""
 	}
 	mime := ooxmlImageMime(part)
 	if mime == "" {
-		return "" // unknown or vector: no vision model can read it
+		return nil, "" // unknown or vector
 	}
-
 	// Bounded by ooxml.MaxPartSize; a media part that trips the cap comes back
-	// as an error and simply yields no caption.
+	// as an error and simply yields nothing.
 	b, err := c.pkg.Part(part)
-	if err != nil || len(b) < ooxmlMinCaptionBytes {
+	if err != nil {
+		return nil, ""
+	}
+	return b, mime
+}
+
+func (c *ooxmlCaptioner) caption(sourcePart, embedID, hint string) string {
+	if c == nil || !c.opts.HasDescriber() {
+		return ""
+	}
+	b, mime := c.media(sourcePart, embedID)
+	if mime == "" || len(b) < ooxmlMinCaptionBytes {
 		return ""
 	}
 
