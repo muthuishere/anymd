@@ -12,6 +12,22 @@ treated as stable from `0.1.0` onward.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two different images could share one inlined payload.** The dedup key
+  began with the byte length written as `string(rune(n))`, and a rune
+  conversion is not injective: every length in the surrogate range
+  `0xD800`-`0xDFFF`, and every length above `0x10FFFF`, collapses to the same
+  replacement character. Two images whose lengths both landed there and whose
+  first and last 64 bytes matched — the same logo saved twice at slightly
+  different quality, say — would resolve to one `data:` URI, so one of them
+  was emitted in the other's place. The length is now written as decimal.
+
+- The dead pre-renderer (`pdfPageText` and the two run-extent helpers it
+  alone used) is removed, having been superseded by the structure-aware
+  renderer, and the soft hyphens in the hyphenation rules are written as
+  `\u00ad` escapes rather than as invisible characters in a string literal.
+
 ## [0.3.0] - 2026-09-26
 
 ### Added

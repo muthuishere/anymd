@@ -19,6 +19,7 @@ package anymd
 import (
 	"encoding/base64"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -117,7 +118,8 @@ func imageKey(data []byte) string {
 	}
 	var sb strings.Builder
 	sb.Grow(2*edge + 8)
-	sb.WriteString(string(rune(len(data))))
+	sb.WriteString(strconv.Itoa(len(data)))
+	sb.WriteByte(0)
 	sb.Write(head)
 	sb.Write(tail)
 	return sb.String()

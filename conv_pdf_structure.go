@@ -69,8 +69,7 @@ type pdfPage struct {
 	imageRefs []pdf.ImageRef
 	// images is those refs resolved to bytes, filled in later and only when
 	// the caller wants images at all.
-	images     []pdfPlacedImage
-	isFallback bool
+	images []pdfPlacedImage
 }
 
 // --- tuning constants ------------------------------------------------------

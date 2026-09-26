@@ -701,11 +701,11 @@ func pdfJoinWrapped(lines []string, witness map[string]bool) string {
 // Guessing instead, as a bare join-if-lowercase rule does, silently produces
 // "longterm" and "email", which then fail to match any quotation of the source.
 func pdfHyphenJoin(cur, next string, witness map[string]bool) (string, string, bool) {
-	if !strings.HasSuffix(cur, "-") && !strings.HasSuffix(cur, "­") {
+	if !strings.HasSuffix(cur, "-") && !strings.HasSuffix(cur, "\u00ad") {
 		return "", "", false
 	}
-	i := strings.LastIndexFunc(strings.TrimRight(cur, "-­"), unicode.IsSpace)
-	head := strings.TrimRight(cur, "-­")[i+1:]
+	i := strings.LastIndexFunc(strings.TrimRight(cur, "-\u00ad"), unicode.IsSpace)
+	head := strings.TrimRight(cur, "-\u00ad")[i+1:]
 	tail := next
 	if j := strings.IndexFunc(next, unicode.IsSpace); j >= 0 {
 		tail = next[:j]
@@ -729,7 +729,7 @@ func pdfHyphenJoin(cur, next string, witness map[string]bool) (string, string, b
 	if witness[strings.ToLower(head+"-"+strings.Trim(tail, ".,;:!?()[]\"'"))] {
 		return "", "", false
 	}
-	return strings.TrimSuffix(strings.TrimRight(cur, "­"), "-"), next, true
+	return strings.TrimSuffix(strings.TrimRight(cur, "\u00ad"), "-"), next, true
 }
 
 // pdfHyphenWitnesses collects every hyphenated compound that appears intact on

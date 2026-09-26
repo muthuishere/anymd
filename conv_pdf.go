@@ -386,118 +386,6 @@ func pdfIsEncryptionError(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "encrypt")
 }
 
-// pdfPageText lays the page's positioned glyphs back out into reading order.
-//
-// We deliberately use the positioned Content() API rather than GetPlainText:
-// GetPlainText concatenates show-text operands, so two adjacent text objects
-// separated only by a Td offset — which is how most producers emit a space
-// between words, and how every column layout works — come out run together.
-// With X, Y, width and font size per glyph we can put the spaces back.
-func pdfPageText(p pdf.Page, budget *int) (out string) {
-	defer func() {
-		// The content-stream interpreter panics on malformed operands; a bad
-		// page degrades to no text rather than killing the document.
-		if recover() != nil {
-			out = ""
-		}
-	}()
-
-	if p.V.IsNull() || p.V.Key("Contents").IsNull() {
-		return ""
-	}
-	chars := p.Content().Text
-	if len(chars) == 0 {
-		return ""
-	}
-	if *budget <= 0 {
-		return ""
-	}
-	if len(chars) > *budget {
-		chars = chars[:*budget]
-	}
-	*budget -= len(chars)
-
-	// Reading order: top to bottom, then left to right. SliceStable keeps the
-	// producer's own order for glyphs the geometry cannot separate (fonts with
-	// no Widths never advance X, so every glyph shares a coordinate).
-	sort.SliceStable(chars, func(i, j int) bool {
-		if chars[i].Y != chars[j].Y {
-			return chars[i].Y > chars[j].Y
-		}
-		return chars[i].X < chars[j].X
-	})
-
-	var paras []string
-	var lines []string
-	var line strings.Builder
-
-	flushLine := func() {
-		if s := mdutil.Collapse(line.String()); s != "" {
-			lines = append(lines, s)
-		}
-		line.Reset()
-	}
-	flushPara := func() {
-		flushLine()
-		if len(lines) > 0 {
-			paras = append(paras, strings.Join(lines, "\n"))
-			lines = nil
-		}
-	}
-
-	var prev pdf.Text
-	var prevEnd float64
-	var prevBot float64
-	first := true
-	for ri, run := range pdfReadingOrder(chars) {
-		if len(run) == 0 {
-			continue
-		}
-		if ri > 0 && pdfRunTop(run) > prevBot {
-			// This run starts higher up the page than the last one ended, so
-			// the pen has jumped back to the top of a new column rather than
-			// carried on down the page. That is a hard break: the glyph loop's
-			// own rules compare a downward gap and would read the jump as a
-			// continuation of the previous sentence.
-			flushPara()
-			first = true
-		}
-		for _, ch := range run {
-			size := ch.FontSize
-			if size <= 0 {
-				size = prev.FontSize
-			}
-			if size <= 0 {
-				size = 1
-			}
-			if first {
-				first = false
-			} else if ch.Y != prev.Y {
-				// New line. A gap much larger than a line height reads as a
-				// paragraph break; anything smaller is just the next line.
-				if prev.Y-ch.Y > 1.8*size {
-					flushPara()
-				} else {
-					flushLine()
-				}
-				prevEnd = ch.X
-			} else if ch.X-prevEnd > 0.25*size {
-				// Same line, but the pen jumped: that jump was a space.
-				line.WriteString(" ")
-			}
-			line.WriteString(ch.S)
-			prev = ch
-			if end := ch.X + ch.W; end > prevEnd {
-				prevEnd = end
-			}
-		}
-		prevBot = pdfRunBottom(run)
-	}
-	flushPara()
-
-	return strings.Join(paras, "\n\n")
-}
-
 // --- Scanned pages: reading the page image with a vision model -------------
 //
 // A scanned PDF has no text layer at all: every page is one large embedded
@@ -850,33 +738,36 @@ func pdfTrimASCII85(b []byte) []byte {
 // and ignoring the whitespace a producer may have wrapped the lines with.
 func pdfDecodeASCIIHex(b []byte) ([]byte, error) {
 	out := make([]byte, 0, len(b)/2)
-	var hi int = -1
+	// Nibbles are held as bytes, not ints: every value is 0-15 by construction
+	// and the arithmetic below then needs no conversion to justify.
+	const noNibble = 0xff
+	hi := byte(noNibble)
 	for _, c := range b {
 		if c == '>' {
 			break
 		}
-		var v int
+		var v byte
 		switch {
 		case c >= '0' && c <= '9':
-			v = int(c - '0')
+			v = c - '0'
 		case c >= 'a' && c <= 'f':
-			v = int(c-'a') + 10
+			v = c - 'a' + 10
 		case c >= 'A' && c <= 'F':
-			v = int(c-'A') + 10
+			v = c - 'A' + 10
 		case isPDFSpace(c):
 			continue
 		default:
 			return nil, errors.New("bad ascii-hex stream")
 		}
-		if hi < 0 {
+		if hi == noNibble {
 			hi = v
 			continue
 		}
-		out = append(out, byte(hi<<4|v))
-		hi = -1
+		out = append(out, hi<<4|v)
+		hi = noNibble
 	}
-	if hi >= 0 { // an odd trailing digit pairs with zero, per the spec
-		out = append(out, byte(hi<<4))
+	if hi != noNibble { // an odd trailing digit pairs with zero, per the spec
+		out = append(out, hi<<4)
 	}
 	return out, nil
 }
@@ -1749,27 +1640,4 @@ func pdfMedianSize(lines []pdfLine) float64 {
 	}
 	sort.Float64s(sizes)
 	return sizes[len(sizes)/2]
-}
-
-// pdfRunTop and pdfRunBottom are the highest and lowest baselines in an emitted
-// run. The renderer compares them across runs to tell "carried on down the
-// page" from "jumped back up to the next column".
-func pdfRunTop(run []pdf.Text) float64 {
-	y := run[0].Y
-	for _, ch := range run[1:] {
-		if ch.Y > y {
-			y = ch.Y
-		}
-	}
-	return y
-}
-
-func pdfRunBottom(run []pdf.Text) float64 {
-	y := run[0].Y
-	for _, ch := range run[1:] {
-		if ch.Y < y {
-			y = ch.Y
-		}
-	}
-	return y
 }
