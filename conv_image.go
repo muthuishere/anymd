@@ -97,7 +97,10 @@ func (c *ImageConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options
 		name = "image"
 	}
 
-	blocks := []string{imagePlaceholder(name)}
+	// The picture itself leads: this converter runs standalone and inside
+	// containers (a zip, an epub, a .msg attachment), and in both the image is
+	// the content rather than a decoration of it.
+	blocks := []string{markdownImage(name, newImageBudget(opts).dataURI(b, info.NormalizedMime()))}
 
 	// A vision model, when the caller supplied one, is the only thing here that
 	// can read the pixels. It goes first because it is the content; dimensions
@@ -113,15 +116,6 @@ func (c *ImageConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options
 		blocks = append(blocks, table)
 	}
 	return Result{Markdown: mdutil.Join(blocks...)}, nil
-}
-
-// imagePlaceholder emits `![name]()` so the image keeps its position when this
-// converter runs inside a container (a zip, an epub, a .msg attachment): the
-// surrounding text still reads in the right order with a visible hole where the
-// picture was.
-func imagePlaceholder(name string) string {
-	alt := strings.NewReplacer("[", `\[`, "]", `\]`, "\n", " ", "\r", " ").Replace(name)
-	return "![" + alt + "]()"
 }
 
 // imageFacts renders the header-only facts: pixel dimensions and the decoded

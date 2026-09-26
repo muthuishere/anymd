@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -124,7 +125,7 @@ func TestImageConvertPNGNoExif(t *testing.T) {
 		t.Fatalf("Convert: %v", err)
 	}
 	want := "![chart.png]()\n\n- Dimensions: 3 × 2\n- Format: png\n"
-	if res.Markdown != want {
+	if stripDataURIs(res.Markdown) != want {
 		t.Fatalf("markdown mismatch\n got: %q\nwant: %q", res.Markdown, want)
 	}
 }
@@ -136,7 +137,7 @@ func TestImageConvertJPEGWithExif(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Convert: %v", err)
 	}
-	want := "![shot.jpg]()\n\n" +
+	want := "![shot.jpg](data:…)\n\n" +
 		"- Dimensions: 8 × 4\n- Format: jpeg\n\n" +
 		"| Tag | Value |\n" +
 		"| --- | --- |\n" +
@@ -146,7 +147,7 @@ func TestImageConvertJPEGWithExif(t *testing.T) {
 		"| ISO | 400 |\n" +
 		"| FocalLength | 50 mm |\n" +
 		"| Artist | Ada |\n"
-	if res.Markdown != want {
+	if stripDataURIs(res.Markdown) != want {
 		t.Fatalf("markdown mismatch\n got: %q\nwant: %q", res.Markdown, want)
 	}
 }
@@ -165,7 +166,7 @@ func TestImageCorruptExifIsNotAnError(t *testing.T) {
 	if bytes.Contains([]byte(res.Markdown), []byte("| Tag |")) {
 		t.Fatalf("expected no EXIF table, got:\n%s", res.Markdown)
 	}
-	if !bytes.HasPrefix([]byte(res.Markdown), []byte("![broken.jpg]()")) {
+	if !strings.HasPrefix(stripDataURIs(res.Markdown), "![broken.jpg](data:…)") {
 		t.Fatalf("placeholder missing:\n%s", res.Markdown)
 	}
 }
@@ -180,7 +181,7 @@ func TestImageUnknownFormatDegrades(t *testing.T) {
 		t.Fatalf("Convert: %v", err)
 	}
 	want := "![logo.webp]()\n\n- Format: webp\n"
-	if res.Markdown != want {
+	if stripDataURIs(res.Markdown) != want {
 		t.Fatalf("markdown mismatch\n got: %q\nwant: %q", res.Markdown, want)
 	}
 }
@@ -191,7 +192,7 @@ func TestImageNoFileNameStillPlaceholds(t *testing.T) {
 		t.Fatalf("Convert: %v", err)
 	}
 	want := "![image]()\n\n- Dimensions: 1 × 1\n- Format: png\n"
-	if res.Markdown != want {
+	if stripDataURIs(res.Markdown) != want {
 		t.Fatalf("markdown mismatch\n got: %q\nwant: %q", res.Markdown, want)
 	}
 }
@@ -249,13 +250,13 @@ func TestImageExifGPSAsDecimalDegrees(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Convert: %v", err)
 	}
-	want := "![geo.jpg]()\n\n" +
+	want := "![geo.jpg](data:…)\n\n" +
 		"- Dimensions: 2 × 2\n- Format: jpeg\n\n" +
 		"| Tag | Value |\n" +
 		"| --- | --- |\n" +
 		"| GPS Latitude | 51.500000 |\n" +
 		"| GPS Longitude | -0.126667 |\n"
-	if res.Markdown != want {
+	if stripDataURIs(res.Markdown) != want {
 		t.Fatalf("markdown mismatch\n got: %q\nwant: %q", res.Markdown, want)
 	}
 }

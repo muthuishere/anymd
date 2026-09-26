@@ -92,7 +92,7 @@ func TestCacheKeyVaries(t *testing.T) {
 		{"different info charset", cacheKeyWith(v, c, cv, StreamInfo{Extension: ".txt", Charset: "latin1"}, o)},
 		{"different filename", cacheKeyWith(v, c, cv, StreamInfo{Extension: ".txt", FileName: "a.txt"}, o)},
 		{"different url", cacheKeyWith(v, c, cv, StreamInfo{Extension: ".txt", URL: "http://x"}, o)},
-		{"keep data uris", cacheKeyWith(v, c, cv, info, &Options{KeepDataURIs: true})},
+		{"drop images", cacheKeyWith(v, c, cv, info, &Options{DropImages: true})},
 		{"different max depth", cacheKeyWith(v, c, cv, info, &Options{MaxDepth: 2})},
 		{"recursion disabled", cacheKeyWith(v, c, cv, info, &Options{MaxDepth: -1})},
 		{"different opts charset", cacheKeyWith(v, c, cv, info, &Options{Charset: "utf-16"})},

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,7 +100,21 @@ func (c *HTMLConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options)
 	if err != nil {
 		return Result{}, err
 	}
+	if opts != nil && opts.DropImages {
+		// An HTML image already arrives as a data: URI when the author inlined
+		// it, so honouring DropImages here is a matter of taking it back out.
+		md = htmlDropDataURIs(md)
+	}
 	return Result{Markdown: mdutil.Join(md), Title: title}, nil
+}
+
+// htmlDataURIDest matches an inlined image destination in rendered Markdown.
+var htmlDataURIDest = regexp.MustCompile(`\(data:[^)\s]*\)`)
+
+// htmlDropDataURIs empties every inlined image destination, leaving the
+// placeholder and its alt text in place so the picture keeps its position.
+func htmlDropDataURIs(md string) string {
+	return htmlDataURIDest.ReplaceAllString(md, "()")
 }
 
 // HTMLToMarkdown is the shared HTML path: every converter whose payload is

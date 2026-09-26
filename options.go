@@ -17,8 +17,29 @@ type Options struct {
 	// default of 8. Negative disables recursion entirely.
 	MaxDepth int
 
-	// KeepDataURIs keeps base64 image payloads inline as data: URIs instead of
-	// dropping them to an empty ![](). Matches markitdown's keep_data_uris.
+	// DropImages replaces every image with an empty ![]() instead of inlining
+	// its bytes as a data: URI.
+	//
+	// The default — inlining — is what makes the Markdown self-contained: the
+	// picture travels with the text, with no sidecar directory and no relative
+	// paths to keep in step. Set this when the destination is a context window
+	// that cannot spare the bytes, or when the text is all that is wanted.
+	DropImages bool
+
+	// MaxImageBytes bounds a single inlined image, measured on the raw bytes
+	// before base64. 0 means the default of 2 MiB. An image over the cap keeps
+	// its placeholder, so it is visibly skipped rather than silently missing.
+	MaxImageBytes int
+
+	// MaxImageTotalBytes bounds every inlined image in one document, again on
+	// raw bytes. 0 means the default of 16 MiB.
+	MaxImageTotalBytes int
+
+	// KeepDataURIs is retained for compatibility and no longer does anything:
+	// image payloads are inlined by default now. Use DropImages to turn that
+	// off.
+	//
+	// Deprecated: use DropImages.
 	KeepDataURIs bool
 
 	// Charset overrides the detected encoding for text-ish formats.

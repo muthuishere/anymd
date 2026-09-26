@@ -68,22 +68,24 @@ func main() {
 
 // config is the parsed command line.
 type config struct {
-	cache     cacheOptions
-	crawl     crawlOptions
-	out       string
-	outdir    string
-	ext       string
-	typeHint  string
-	charset   string
-	maxDepth  int
-	keepURIs  bool
-	recursive bool
-	quiet     bool
-	failFast  bool
-	title     bool
-	insecure  bool
-	list      bool
-	showVer   bool
+	cache      cacheOptions
+	crawl      crawlOptions
+	out        string
+	outdir     string
+	ext        string
+	typeHint   string
+	charset    string
+	maxDepth   int
+	keepURIs   bool
+	noImages   bool
+	maxImageKB int
+	recursive  bool
+	quiet      bool
+	failFast   bool
+	title      bool
+	insecure   bool
+	list       bool
+	showVer    bool
 
 	// LLM options. Everything here is off unless --llm is given: without it
 	// anymd makes no network calls during conversion at all, which is the
@@ -128,7 +130,9 @@ func newFlagSet(cfg *config, stderr io.Writer) *flag.FlagSet {
 	strVar(&cfg.typeHint, "", "t", "type")
 	strVar(&cfg.charset, "", "charset")
 	fs.IntVar(&cfg.maxDepth, "max-depth", 0, "")
-	boolVar(&cfg.keepURIs, "keep-data-uris")
+	boolVar(&cfg.keepURIs, "keep-data-uris") // deprecated: now the default
+	boolVar(&cfg.noImages, "no-images")
+	fs.IntVar(&cfg.maxImageKB, "max-image-kb", 0, "")
 	boolVar(&cfg.recursive, "r", "recursive")
 	boolVar(&cfg.quiet, "q", "quiet")
 	boolVar(&cfg.failFast, "fail-fast")
@@ -169,7 +173,8 @@ flags:
   -r, --recursive    walk directories given as inputs
       --charset NAME override the detected text encoding
       --max-depth N  bound container recursion (zip in a zip); default 8
-      --keep-data-uris  keep base64 images inline as data: URIs
+      --no-images       drop image payloads, leaving an empty ![]()
+      --max-image-kb N  largest image to inline, in KiB (default 2048)
       --title        prepend "# Title" when the converter found one
   -q, --quiet        suppress per-file progress lines on stderr
       --fail-fast    stop at the first error (default: continue, report at end)
@@ -267,9 +272,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	opts := &anymd.Options{
-		MaxDepth:     cfg.maxDepth,
-		KeepDataURIs: cfg.keepURIs,
-		Charset:      cfg.charset,
+		MaxDepth:      cfg.maxDepth,
+		DropImages:    cfg.noImages,
+		MaxImageBytes: cfg.maxImageKB * 1024,
+		Charset:       cfg.charset,
 	}
 
 	if code := applyLLM(cfg, opts, stderr); code != exitOK {

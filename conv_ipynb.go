@@ -2,6 +2,7 @@ package anymd
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -106,6 +107,7 @@ type nbOutput struct {
 
 // Convert renders the notebook.
 func (c *IpynbConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options) (Result, error) {
+	images := newImageBudget(opts)
 	raw, err := io.ReadAll(io.LimitReader(r, maxIpynbBytes+1))
 	if err != nil {
 		return Result{}, err
@@ -138,18 +140,24 @@ func (c *IpynbConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options
 			if strings.TrimSpace(src) != "" {
 				blocks = append(blocks, mdutil.CodeBlock(lang, src))
 			}
-			blocks = append(blocks, nbOutputBlocks(cell.Outputs)...)
+			blocks = append(blocks, nbOutputBlocks(cell.Outputs, images)...)
 		}
 	}
 	return Result{Markdown: mdutil.Join(blocks...), Title: strings.TrimSpace(nb.Metadata.Title)}, nil
 }
 
-// nbOutputBlocks renders the textual outputs of a cell. display_data (charts,
-// images) and any binary mime type are skipped; stream text and the text/plain
-// form of an execute_result are kept.
-func nbOutputBlocks(outs []nbOutput) []string {
+// nbOutputBlocks renders a cell's outputs: stream text, the text/plain form of
+// an execute_result, and any image a cell produced.
+//
+// The image is usually the whole point of the cell. A notebook's charts are
+// display_data outputs carrying base64 PNG, and dropping them leaves a page of
+// code with every result it computed missing.
+func nbOutputBlocks(outs []nbOutput, images *imageBudget) []string {
 	var blocks []string
 	for _, out := range outs {
+		if uri := nbImage(out, images); uri != "" {
+			blocks = append(blocks, markdownImage("", uri))
+		}
 		var text string
 		switch out.OutputType {
 		case "stream":
@@ -159,7 +167,7 @@ func nbOutputBlocks(outs []nbOutput) []string {
 				text = nbSource(v)
 			}
 		default:
-			continue // display_data, error, and anything unknown
+			continue // error, and anything unknown
 		}
 		if strings.TrimSpace(text) == "" {
 			continue
@@ -167,6 +175,42 @@ func nbOutputBlocks(outs []nbOutput) []string {
 		blocks = append(blocks, mdutil.CodeBlock("", text))
 	}
 	return blocks
+}
+
+// nbImageMimes are the image types a notebook output may carry, preferred in
+// this order.
+var nbImageMimes = []string{"image/png", "image/jpeg", "image/gif", "image/webp"}
+
+// nbImage returns the data: URI for an output's image, if it has one.
+//
+// A notebook's charts are display_data outputs carrying base64 PNG, and they
+// are usually the whole point of the cell that produced them. The payload is
+// already base64, and is decoded only so it can be measured and re-encoded:
+// that keeps every image in the document under one budget and one dedup cache,
+// rather than letting a notebook bypass both by arriving pre-encoded.
+func nbImage(out nbOutput, images *imageBudget) string {
+	if len(out.Data) == 0 {
+		return ""
+	}
+	for _, mime := range nbImageMimes {
+		v, ok := out.Data[mime]
+		if !ok {
+			continue
+		}
+		var payload string
+		if err := json.Unmarshal(v, &payload); err != nil {
+			// Some writers store the payload as an array of lines.
+			payload = nbSource(v)
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(payload), ""))
+		if err != nil {
+			continue
+		}
+		if uri := images.dataURI(raw, mime); uri != "" {
+			return uri
+		}
+	}
+	return ""
 }
 
 // nbSource decodes an nbformat multiline value, which is legally either a

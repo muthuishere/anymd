@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -246,7 +247,8 @@ func cacheKeyWith(version string, content []byte, converter string, info StreamI
 	var num [8]byte
 	binary.BigEndian.PutUint64(num[:], uint64(remaining+1))
 	field(h, 'd', num[:])
-	field(h, 'o', []byte{boolByte(o.KeepDataURIs), boolByte(o.Describer != nil), boolByte(o.Transcriber != nil)})
+	field(h, 'o', []byte{boolByte(o.DropImages), boolByte(o.Describer != nil), boolByte(o.Transcriber != nil)})
+	field(h, 'I', []byte(strconv.Itoa(o.MaxImageBytes)+":"+strconv.Itoa(o.MaxImageTotalBytes)))
 	field(h, 'C', []byte(o.Charset))
 
 	field(h, 'b', content)
