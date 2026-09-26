@@ -12,6 +12,215 @@ treated as stable from `0.1.0` onward.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-26
+
+### Added
+
+- **A text-layer soundness gate.** A PDF whose fonts carry no usable ToUnicode
+  mapping still draws glyphs in the right places, so extraction "succeeds":
+  correct reading order, correct line breaks, every character meaningless.
+  Nothing downstream can tell that from real text. anymd now measures the share
+  of glyphs that decode to the replacement character, a private-use code point
+  or a stray control code, and acts on it:
+
+  - above 2% (the figure Marker uses) the page is no longer trusted, and with
+    an `Options.Describer` the pixels are read by a vision model instead;
+  - above 30% there is nothing worth keeping, and a document whose every page
+    is in that state returns the new `ErrGarbledTextLayer` rather than fluent
+    rubbish.
+
+  The two thresholds are separate deliberately. Marker's 2% chooses between a
+  text layer and OCR, with OCR always available; anymd has no OCR, so at 2% the
+  choice is between imperfect text and nothing. A real document met in testing
+  was 12% unreadable — a school report whose headings came through a subset
+  font as "6WXGHQW 3URJUHVV 5HSRUW" while the student's name and roll number
+  were perfectly correct. Refusing that would lose the 88% that was right.
+
+- **Heading levels from the document outline.** A PDF's bookmarks are the
+  author's own table of contents: they name the headings and say how they nest,
+  which is exactly what the font and numbering rules have to infer. The outline
+  now settles the level where it names a line, and recognises a heading set at
+  body size that the size rule cannot see. It never invents one: an outline
+  entry can point anywhere, and a heading conjured where the page shows none is
+  worse than a missing one. On a Word document converted to PDF, the headings
+  extracted from the PDF now match those extracted from the DOCX exactly.
+
+- **Images are inlined as base64 `data:` URIs, in every format that carries
+  them.** A document's pictures are part of its content; dropping them to an
+  empty `![]()` kept the position and lost the thing itself. This now covers
+  PDF, DOCX, PPTX, notebooks, standalone images and images inside containers,
+  so the Markdown is self-contained — no sidecar directory, no relative paths
+  to keep in step.
+
+  Size is metered rather than unbounded: `--max-image-kb` caps a single image
+  (default 2 MiB of raw bytes), a document-wide budget caps the rest (16 MiB),
+  and an image over either cap keeps its placeholder so it is visibly skipped
+  rather than silently missing. Repeats — a letterhead on every page, a logo on
+  every slide — are encoded once and charged once. `--no-images`
+  (`Options.DropImages`) restores the old behaviour.
+
+- **PDF figures are extracted and placed in reading order.** Images were only
+  ever looked at on a page with *no* text, the pure-scan case, so a chart in a
+  report was dropped along with any sign it had been there — its caption left
+  pointing at nothing. Even `--llm` never saw it. Three things were missing and
+  are now in place:
+
+  - the content interpreter had no `Do` operator at all, so image *placement*
+    was invisible; it now records each placement with the area the graphics
+    state puts it in, which is what lets a figure sit between the right two
+    paragraphs instead of being appended somewhere;
+  - Form XObjects are followed to the image inside them, which is how
+    reportlab, Word and LibreOffice all wrap a picture;
+  - `/Filter` is treated as the chain it is. An ordinary
+    `[/ASCII85Decode /DCTDecode]` photograph matched no case at all and was
+    skipped; transport filters (ASCII85, ASCIIHex) are now undone before the
+    image codec is read.
+
+- **Composite and standard-14 font metrics**, and **notebook image outputs**
+  (a notebook's charts are `display_data` payloads, and were dropped).
+
+- **PDF structure recovery.** A PDF records glyphs and coordinates, not
+  headings, lists or tables; a converter that only sorts the glyphs throws away
+  every structure a reader can see. anymd now recovers, deterministically and
+  with no model involved:
+
+  - **Tables**, ruled and borderless, as GitHub-flavored pipe tables. Columns
+    come from cell-interval overlap rather than left edges, so a column of
+    right-aligned figures stays one column, and cells are placed in the track
+    their geometry puts them in — a totals row's amount lands under "Amount",
+    not under "Description". Every cell is filled from the glyphs inside it, so
+    a wrong grid can misplace a value but can never invent one.
+  - **Headings**, from font size relative to the document's body size and from
+    section numbering (`2.`, `1.1`, `Artikel 5.`), with the numbering deciding
+    depth because it is authored hierarchy. Bold alone never makes a heading: a
+    body-size lead-in like "Conditions:" is not a section, and promoting it
+    splits a rule from the condition it governs.
+  - **Lists**, bulleted and numbered, including the private-use code points
+    Word writes for a Symbol or Wingdings bullet, markers set in their own text
+    frame, and nesting recovered from indentation.
+  - **Wrapped lines joined into paragraphs**, with paragraph breaks measured
+    against the page's own prevailing leading rather than a fixed multiple of
+    the font size.
+  - **Hyphenation repaired with evidence.** A line-final hyphen is joined only
+    when the document does not spell the compound out intact somewhere else, so
+    "sys-" + "tem" becomes "system" while "e-" + "mail" and "long-" + "term"
+    stay as the author wrote them. Capitals, digits and suspended hyphens
+    ("in- en verkoop") are never joined.
+  - **Running headers and footers** detected across pages and reported once
+    rather than on every page — kept, not deleted, because a footer reading
+    "last updated …" is often the only place that fact appears.
+
+- **A table is no longer mistaken for a two-column page.** The reading-order cut
+  now rejects a gutter whose rows share baselines and whose lines stop short of
+  their column edges, which is a table's signature and not prose's. Cutting
+  there used to read a table down its columns, divorcing every figure from its
+  row.
+
+- **DOCX lists that are lists by style.** A paragraph can be a list item with no
+  `w:numPr` of its own, with the numbering hanging off the style — which is what
+  python-docx and LibreOffice produce for "List Bullet" and "List Number". Those
+  lists were arriving as unmarked paragraphs.
+
+- **PPTX outlines are lists.** Body placeholder text on a slide is a bulleted
+  list; PowerPoint inherits the bullet from the layout rather than writing it
+  into the slide, so it was being emitted as loose paragraphs. Nesting comes
+  from `a:pPr lvl`. Titles and subtitles stay prose.
+
+### Changed
+
+- PDF output joins wrapped lines into paragraphs instead of emitting one
+  Markdown line per PDF line. A single newline inside a Markdown paragraph is
+  not a line break, and keeping one made hyphenation repair impossible.
+
+### Fixed
+
+- **Simulated bold doubled every character.** A document that wants a weight
+  its font does not have paints the glyphs twice, a hair apart. Both paintings
+  are real glyphs in the text layer, so "Important" came out as
+  "IImmppoorrttaanntt". An overprint is now recognised by position — it sits
+  within a fraction of the font size of the glyph it is thickening, while a
+  genuine double letter is a whole advance away, so "bookkeeper" is untouched.
+
+- **A running header of more than one line kept repeating.** Only the single
+  outermost line of each band could be furniture, so a two-line masthead had
+  its first line suppressed and its second left on every page — the more
+  visible half of the failure. Furniture is now a block chained inward from the
+  edge of the page, capped at three lines per band.
+
+- **The furniture band was measured against the ink, not the page.** A margin
+  is measured from the edge of the paper, so the last line of body text on any
+  page sat, by construction, at distance zero from the "bottom" and fell inside
+  the footer band every time. Bounds now come from the MediaBox, inherited up
+  the page tree.
+
+- **Body text that starts near the edge of the page is no longer taken as
+  furniture.** A document set with ordinary one-inch margins puts its first
+  line inside any band wide enough to catch a real running head, and its last
+  line inside the footer band; the digit normalisation that lets "Page 3" match
+  "Page 4" then matched those lines across pages and deleted them. Narrowing
+  the band is not the answer — a real footer sits further into the page than a
+  header does, and a tight band loses it. What separates the two is the gap: a
+  running head stands detached from the text, while body text runs on at the
+  body's own pitch straight through the band. Furniture is now the block
+  chained in from the page edge, ended where the document's own body type
+  appears, and kept only when it is detached from the text that follows.
+
+  Two details matter more than they look. The block ends at the *body* size
+  rather than at any change of size, because a masthead is commonly two sizes —
+  a name over a strapline — and cutting it at the first change splits it,
+  leaving the smaller half to repeat on every page. And on a page with too few
+  lines to measure a pitch (a cover sheet, a short form), the pitch is not
+  measured at all but estimated from the type size: every gap such a page
+  offers is one of the gaps being judged, so measuring would compare the
+  yardstick against itself and let a properly detached header through.
+
+- **A table spanning pages came apart, and lost a row to each break.** Three
+  faults met: the repeated header row is exactly the shape the running-header
+  pass looks for, so suppressing it left the delimiter row to promote that
+  page's first *data* row into a header; rendering page by page emitted one
+  table per page separated by a rule, which Markdown cannot resume a table
+  after; and the table's own rows outnumbered the prose, so the body-size
+  estimate came from the table and turned every real paragraph into a heading.
+  Table rows are now immune to furniture detection, excluded from body sizing,
+  and stitched back into one table across the break.
+
+- **`--keep-data-uris` never did anything.** It was declared, documented, in
+  the CLI help and hashed into the cache key, but no converter read it — and
+  the default was the opposite of what it documented. It is now deprecated and
+  accepted as a no-op, since inlining is the default; use `--no-images` to opt
+  out.
+
+- **PDF text was silently corrupted whenever a font mapped one code to several
+  characters.** A ToUnicode CMap may map a single code to a string — that is how
+  a subset font spells out a ligature, so the one `ft` glyph LibreOffice emits
+  for "Platform" decodes to two characters. The decoder walked the decoded runes
+  and the raw codes with one index, so from the first ligature on a line every
+  glyph was measured with the wrong code's width. Positions drifted, the sort by
+  X reordered the line, and real documents came out as "Platofrm", "Optino",
+  "Migratoin efofrt" and "Trade-ofsf". Decoding is now per code.
+
+- **Every `TJ` operator appended a spurious glyph.** The text builder ended each
+  `TJ` with a synthetic `"\n"`, which was then decoded through the current
+  font. In a subset font byte `0x0A` is a real glyph, so every LibreOffice line
+  ended in a stray letter — `t`, `r`, `p`, `m`, whichever the font put at that
+  code.
+
+- **Standard-14 fonts had no metrics at all.** A font from the Core 14 may be
+  named without being embedded and without a `/Widths` array; a viewer is
+  required to know its metrics already. anymd did not, so `Width` returned zero
+  for every glyph, the text matrix never advanced, and a whole page of glyphs
+  was reported at one X coordinate. The characters still came out in document
+  order, which is why this went unnoticed — but every structure inferred from
+  geometry was being inferred from nothing. The published AFM widths now ship
+  with the parser, with the usual aliases (Arial, Liberation Sans, …) folded in.
+
+- **Composite (Type0) font widths** are read from the descendant font's `/W`
+  array and `/DW`, instead of through the simple-font `/Widths` path that
+  returns zero for them.
+
+- **Word spacing (`Tw`) was ignored**, shrinking every inter-word gap — the same
+  signal the layout passes use to find word, column and cell boundaries.
+
 ## [0.2.0] - 2026-09-03
 
 ### Added
@@ -274,5 +483,7 @@ the cost and the data boundary.
 - Encrypted zips and DRM'd EPUBs are refused.
 - `.msg` attachments, RTF-compressed bodies and recipient storages are skipped.
 
-[Unreleased]: https://github.com/muthuishere/anymd/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/muthuishere/anymd/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/muthuishere/anymd/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/muthuishere/anymd/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/muthuishere/anymd/releases/tag/v0.1.0
