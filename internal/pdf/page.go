@@ -191,6 +191,145 @@ func (f Font) Width(code int) float64 {
 	return f.V.Key("Widths").Index(code - first).Float64()
 }
 
+// CodeWidth returns the width of one code, in glyph-space units.
+//
+// n is how many bytes the code occupied in the content stream, which is what
+// tells a simple font from a composite one: a simple font indexes /Widths by a
+// single byte, while a Type0 font's widths live in its descendant's /W array,
+// keyed by CID, with /DW for everything the array omits. Reading a composite
+// font through the simple path returns zero for every glyph, so the text
+// matrix never advances and a whole page collapses onto one X coordinate.
+func (f Font) CodeWidth(code, n int, text string) float64 {
+	if n == 1 && f.V.Key("Widths").Kind() == Array {
+		if w := f.Width(code); w != 0 {
+			return w
+		}
+		return f.standardWidth(text)
+	}
+	if d := f.V.Key("DescendantFonts").Index(0); d.Kind() == Dict {
+		if w, ok := cidWidth(d.Key("W"), code); ok {
+			return w
+		}
+		if dw := d.Key("DW"); dw.Kind() == Integer || dw.Kind() == Real {
+			return dw.Float64()
+		}
+		return 1000 // the default /DW when the font omits it
+	}
+	if w := f.Width(code); w != 0 {
+		return w
+	}
+	return f.standardWidth(text)
+}
+
+// standardWidth looks a glyph up in the Core 14 metrics, which is where the
+// width lives for a font the document names but does not embed or measure.
+func (f Font) standardWidth(text string) float64 {
+	table := stdFontWidths[stdFontName(f.BaseFont())]
+	if table == nil {
+		return 0
+	}
+	for _, r := range text {
+		if w, ok := table[r]; ok {
+			return w
+		}
+		break
+	}
+	return 0
+}
+
+// stdFontName maps what a document calls a font to the Core 14 name whose
+// metrics apply. Subset prefixes are stripped, and the aliases every producer
+// uses for the three core families are folded in: a PDF that asks for "Arial"
+// without embedding it is asking for Helvetica's metrics, which is exactly what
+// a viewer gives it.
+func stdFontName(name string) string {
+	if i := strings.Index(name, "+"); i >= 0 {
+		name = name[i+1:]
+	}
+	if _, ok := stdFontWidths[name]; ok {
+		return name
+	}
+	lower := strings.ToLower(name)
+	base, sep := lower, ""
+	if i := strings.IndexAny(lower, ",-"); i >= 0 {
+		base, sep = lower[:i], lower[i+1:]
+	}
+	bold := strings.Contains(sep, "bold") || strings.Contains(base, "bd")
+	italic := strings.Contains(sep, "italic") || strings.Contains(sep, "oblique")
+
+	switch {
+	case strings.HasPrefix(base, "courier") || strings.HasPrefix(base, "mono"):
+		switch {
+		case bold && italic:
+			return "Courier-BoldOblique"
+		case bold:
+			return "Courier-Bold"
+		case italic:
+			return "Courier-Oblique"
+		}
+		return "Courier"
+	case strings.HasPrefix(base, "times") || strings.HasPrefix(base, "timesnewroman") || strings.HasPrefix(base, "serif"):
+		switch {
+		case bold && italic:
+			return "Times-BoldItalic"
+		case bold:
+			return "Times-Bold"
+		case italic:
+			return "Times-Italic"
+		}
+		return "Times-Roman"
+	case strings.HasPrefix(base, "symbol"):
+		return "Symbol"
+	case strings.HasPrefix(base, "zapf"):
+		return "ZapfDingbats"
+	}
+	// Helvetica is the fallback family: it is what Arial, Liberation Sans,
+	// Nimbus Sans and every other metric-compatible clone is standing in for,
+	// and a wrong-family width is far better than no advance at all.
+	switch {
+	case bold && italic:
+		return "Helvetica-BoldOblique"
+	case bold:
+		return "Helvetica-Bold"
+	case italic:
+		return "Helvetica-Oblique"
+	}
+	return "Helvetica"
+}
+
+// cidWidth reads one CID's width out of a /W array, which interleaves two
+// shapes: "c [w1 w2 ...]" listing consecutive CIDs, and "cFirst cLast w"
+// giving one width to a whole run.
+func cidWidth(w Value, cid int) (float64, bool) {
+	if w.Kind() != Array {
+		return 0, false
+	}
+	for i := 0; i < w.Len(); {
+		first := w.Index(i)
+		if first.Kind() != Integer {
+			return 0, false
+		}
+		next := w.Index(i + 1)
+		if next.Kind() == Array {
+			lo := int(first.Int64())
+			if cid >= lo && cid < lo+next.Len() {
+				return next.Index(cid - lo).Float64(), true
+			}
+			i += 2
+			continue
+		}
+		if i+2 >= w.Len() {
+			return 0, false
+		}
+		lo, hi := int(first.Int64()), int(next.Int64())
+		if cid >= lo && cid <= hi {
+			return w.Index(i + 2).Float64(), true
+		}
+		i += 3
+	}
+	return 0, false
+}
+
 // Encoder returns the encoding between font code point sequences and UTF-8.
 func (f Font) Encoder() TextEncoding {
 	if f.enc == nil { // caching the Encoder so we don't have to continually parse charmap
@@ -321,8 +460,75 @@ type cmap struct {
 	bfchar  []bfchar
 }
 
+// codeUnit is one font code as it appeared in the content stream, paired with
+// the text it decodes to.
+//
+// The pairing matters because the two are not one-to-one. A ToUnicode CMap may
+// map a single code to several runes — that is how a subset font spells out a
+// ligature, so the `ft` glyph LibreOffice emits for "Platform" decodes to two
+// characters from one byte. Walking the decoded runes and the raw codes with a
+// single index, as this package used to, then reads the width of the wrong code
+// for every glyph after the first ligature on the line: positions drift, and a
+// sort by X hands back "Platofrm".
+type codeUnit struct {
+	n    int    // bytes of raw consumed by this code
+	code int    // the code itself, for the width lookup
+	text string // its decoded UTF-8; may be more than one rune
+}
+
+// A codeDecoder splits raw content-stream bytes into codes without collapsing
+// the boundaries between them. Every encoding in this package implements it;
+// TextEncoding stays as it was so that external callers are unaffected.
+type codeDecoder interface {
+	DecodeCodes(raw string) []codeUnit
+}
+
+// decodeCodes splits raw into codes using enc when it can, and falls back to
+// one byte per code for an encoding that predates the interface.
+func decodeCodes(enc TextEncoding, raw string) []codeUnit {
+	if cd, ok := enc.(codeDecoder); ok {
+		return cd.DecodeCodes(raw)
+	}
+	out := make([]codeUnit, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		out = append(out, codeUnit{n: 1, code: int(raw[i]), text: enc.Decode(raw[i : i+1])})
+	}
+	return out
+}
+
+func (e *nopEncoder) DecodeCodes(raw string) []codeUnit { return singleByteCodes(e, raw) }
+
+func (e *byteEncoder) DecodeCodes(raw string) []codeUnit { return singleByteCodes(e, raw) }
+
+func (e *dictEncoder) DecodeCodes(raw string) []codeUnit { return singleByteCodes(e, raw) }
+
+func singleByteCodes(enc TextEncoding, raw string) []codeUnit {
+	out := make([]codeUnit, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		out = append(out, codeUnit{n: 1, code: int(raw[i]), text: enc.Decode(raw[i : i+1])})
+	}
+	return out
+}
+
 func (m *cmap) Decode(raw string) (text string) {
-	var r []rune
+	var b strings.Builder
+	for _, u := range m.DecodeCodes(raw) {
+		b.WriteString(u.text)
+	}
+	return b.String()
+}
+
+// DecodeCodes walks the codespace ranges exactly as Decode used to, but keeps
+// each code's byte length and value alongside the text it produced.
+func (m *cmap) DecodeCodes(raw string) []codeUnit {
+	var out []codeUnit
+	emit := func(n int, text string, code string) {
+		v := 0
+		for i := 0; i < len(code); i++ {
+			v = v<<8 | int(code[i])
+		}
+		out = append(out, codeUnit{n: n, code: v, text: text})
+	}
 Parse:
 	for len(raw) > 0 {
 		for n := 1; n <= 4 && n <= len(raw); n++ { // number of digits in character replacement (1-4 possible)
@@ -332,7 +538,7 @@ Parse:
 					raw = raw[n:]
 					for _, bfchar := range m.bfchar { // check for matching bfchar
 						if len(bfchar.orig) == n && bfchar.orig == text {
-							r = append(r, []rune(utf16Decode(bfchar.repl))...)
+							emit(n, utf16Decode(bfchar.repl), text)
 							continue Parse
 						}
 					}
@@ -345,15 +551,14 @@ Parse:
 									b[len(b)-1] += text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1] // increment last byte by difference
 									s = string(b)
 								}
-								r = append(r, []rune(utf16Decode(s))...)
+								emit(n, utf16Decode(s), text)
 								continue Parse
 							}
 							if bfrange.dst.Kind() == Array {
-								n := text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1]
-								v := bfrange.dst.Index(int(n))
+								i := text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1]
+								v := bfrange.dst.Index(int(i))
 								if v.Kind() == String {
-									s := v.RawString()
-									r = append(r, []rune(utf16Decode(s))...)
+									emit(n, utf16Decode(v.RawString()), text)
 									continue Parse
 								}
 								if DebugOn {
@@ -364,11 +569,11 @@ Parse:
 									fmt.Printf("unknown dst %v\n", bfrange.dst)
 								}
 							}
-							r = append(r, noRune)
+							emit(n, string(noRune), text)
 							continue Parse
 						}
 					}
-					r = append(r, noRune)
+					emit(n, string(noRune), text)
 					continue Parse
 				}
 			}
@@ -376,10 +581,10 @@ Parse:
 		if DebugOn {
 			println("no code space found")
 		}
-		r = append(r, noRune)
+		emit(1, string(noRune), raw[:1])
 		raw = raw[1:]
 	}
-	return string(r)
+	return out
 }
 
 func readCmap(toUnicode Value) *cmap {
@@ -484,6 +689,11 @@ type Text struct {
 	S        string  // the actual UTF-8 text
 }
 
+// maxImageRefs bounds how many placements one page may report. A content
+// stream can call Do in a loop, and the file's own structure is never trusted
+// to size an allocation.
+const maxImageRefs = 4096
+
 // A Rect represents a rectangle.
 type Rect struct {
 	Min, Max Point
@@ -497,8 +707,22 @@ type Point struct {
 
 // Content describes the basic content on a page: the text and any drawn rectangles.
 type Content struct {
-	Text []Text
-	Rect []Rect
+	Text  []Text
+	Rect  []Rect
+	Image []ImageRef
+}
+
+// An ImageRef is one XObject drawn on the page by a Do operator, with the area
+// it was drawn into.
+//
+// Placement is the whole point of recording it. A PDF's images live in a
+// resource dictionary that says nothing about where — or whether — they appear;
+// only the Do operator places one, and only the graphics state in force at that
+// moment says where. Without this, an image can be extracted but never put back
+// in the reading order it belongs to.
+type ImageRef struct {
+	Name string // the XObject's name in the page's /XObject dictionary
+	Rect Rect   // the area it covers, in page space
 }
 
 type gstate struct {
@@ -841,14 +1065,8 @@ func (p Page) Content() Content {
 
 	var text []Text
 	showText := func(s string) {
-		n := 0
-		decoded := enc.Decode(s)
-		for _, ch := range decoded {
-			var w0 float64
-			if n < len(s) {
-				w0 = g.Tf.Width(int(s[n]))
-			}
-			n++
+		for _, u := range decodeCodes(enc, s) {
+			w0 := g.Tf.CodeWidth(u.code, u.n, u.text)
 
 			f := g.Tf.BaseFont()
 			if i := strings.Index(f, "+"); i >= 0 {
@@ -856,15 +1074,22 @@ func (p Page) Content() Content {
 			}
 
 			Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
-			text = append(text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch)})
+			text = append(text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], u.text})
 
 			tx := w0/1000*g.Tfs + g.Tc
+			// Word spacing applies to the single-byte code 32 only (PDF 32000-1
+			// §9.3.3). Leaving it out shrinks every inter-word gap, which is the
+			// same signal the layout pass uses to decide where a space goes.
+			if u.n == 1 && u.code == 32 {
+				tx += g.Tw
+			}
 			tx *= g.Th
 			g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
 		}
 	}
 
 	var rect []Rect
+	var images []ImageRef
 	var gstack []gstate
 	Interpret(strm, func(stk *Stack, op string) {
 		n := stk.Len()
@@ -906,6 +1131,42 @@ func (p Page) Content() Content {
 
 		case "cs": // set colorspace non-stroking
 		case "scn": // set color non-stroking
+
+		case "Do": // paint an XObject
+			if len(args) != 1 {
+				panic("bad Do")
+			}
+			// The CTM maps the unit square onto wherever the XObject lands, so
+			// the four corners of that square give the placed area. Taking the
+			// corners rather than the origin and the scale factors is what
+			// keeps a rotated or flipped placement honest.
+			var xs, ys [4]float64
+			corners := [4][2]float64{{0, 0}, {1, 0}, {0, 1}, {1, 1}}
+			for i, c := range corners {
+				xs[i] = c[0]*g.CTM[0][0] + c[1]*g.CTM[1][0] + g.CTM[2][0]
+				ys[i] = c[0]*g.CTM[0][1] + c[1]*g.CTM[1][1] + g.CTM[2][1]
+			}
+			minX, maxX, minY, maxY := xs[0], xs[0], ys[0], ys[0]
+			for i := 1; i < 4; i++ {
+				if xs[i] < minX {
+					minX = xs[i]
+				}
+				if xs[i] > maxX {
+					maxX = xs[i]
+				}
+				if ys[i] < minY {
+					minY = ys[i]
+				}
+				if ys[i] > maxY {
+					maxY = ys[i]
+				}
+			}
+			if len(images) < maxImageRefs {
+				images = append(images, ImageRef{
+					Name: args[0].Name(),
+					Rect: Rect{Point{minX, minY}, Point{maxX, maxY}},
+				})
+			}
 
 		case "re": // append rectangle to path
 			if len(args) != 4 {
@@ -1003,7 +1264,6 @@ func (p Page) Content() Content {
 					g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
 				}
 			}
-			showText("\n")
 
 		case "TL": // set text leading
 			if len(args) != 1 {
@@ -1048,7 +1308,7 @@ func (p Page) Content() Content {
 			g.Th = args[0].Float64() / 100
 		}
 	})
-	return Content{text, rect}
+	return Content{text, rect, images}
 }
 
 // TextVertical implements sort.Interface for sorting

@@ -163,8 +163,8 @@ not point it at the public internet.
 | CSV / TSV | `.csv` `.tsv` `.tab` | delimiter sniffing → GFM pipe table | formulas (there are none), cell types |
 | Excel | `.xlsx` `.xlsm` `.xltx` `.xltm` | every sheet as a heading + table, computed cell values | charts, images, macros, pivot tables |
 | Excel (legacy) | `.xls` `.xlt` `.xlm` `.xlw` | same output as `.xlsx`, byte-identical on the same workbook | formula results (the BIFF reader returns a placeholder), Excel's own date formats |
-| Word | `.docx` | headings, paragraphs, lists, tables, links, image alt text, core-properties title; embedded image captions with `--llm` | comments, tracked changes |
-| PDF | `.pdf` | text layer, page by page, in column-aware reading order; with `--llm`, pages with no text layer are read by a vision model | tables, headings, figures, form fields |
+| Word | `.docx` | headings, paragraphs, lists, tables, links, images inlined as base64 `data:` URIs with their alt text, core-properties title; image captions with `--llm` | comments, tracked changes |
+| PDF | `.pdf` | text layer, page by page, in column-aware reading order, with structure recovered from the page geometry: headings, bulleted and numbered lists, ruled and borderless tables as pipe tables, paragraphs rejoined with hyphenation repaired, running headers and footers reported once. Figures are extracted and inlined as base64 `data:` URIs in reading order. With `--llm`, pages with no text layer are read by a vision model | form fields, bold/italic runs |
 | HTML | `.html` `.htm` `.xhtml` `.xht` | headings, lists, tables, links, code, `<title>` | scripts, styles, anything requiring JS execution, remote assets |
 | Feeds | `.rss` `.atom` `.xml` `.rdf` | channel/feed title, per-entry title, date, link, summary | full-article fetch (that would be a network call) |
 | JSON | `.json` | pretty-printed, fenced as a code block | schema inference, semantic flattening |

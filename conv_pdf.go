@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"crypto/sha256"
+	"encoding/ascii85"
 	"errors"
 	"fmt"
 	"image"
@@ -36,6 +37,60 @@ var ErrNoTextLayer = errors.New("pdf has no text layer (scanned images only); OC
 // an empty password. We surface this instead of emitting empty output, so an
 // encrypted file is never mistaken for an empty one.
 var ErrEncryptedPDF = errors.New("pdf is encrypted")
+
+// ErrGarbledTextLayer reports that a PDF has a text layer, but one that cannot
+// be read: its fonts carry no usable ToUnicode mapping, so the glyphs decode to
+// replacement characters, private-use code points or control codes.
+//
+// This is a distinct outcome from ErrNoTextLayer, and a more dangerous one.
+// A document with no text at all is obviously empty; a document with an
+// unreadable text layer extracts "successfully" and returns fluent-looking
+// rubbish, in the right reading order, with the right line breaks. Nothing
+// downstream can tell that from real text. Saying so is the only safe answer,
+// and with an Options.Describer the page is read by a vision model instead.
+var ErrGarbledTextLayer = errors.New("pdf text layer is unreadable (no usable ToUnicode mapping); OCR is out of scope for anymd")
+
+// pdfMaxBadGlyphShare is the share of unreadable glyphs above which a page's
+// text layer is no longer trusted, and a vision model is preferred if the
+// caller supplied one. The 2% figure is the one Marker uses for the same
+// decision, and it is deliberately low: a sound text layer has essentially
+// none, so anything approaching a fiftieth is a broken font rather than a few
+// exotic characters.
+const pdfMaxBadGlyphShare = 0.02
+
+// pdfRefuseBadGlyphShare is the much higher share at which the text is not
+// worth emitting at all.
+//
+// The two thresholds are separate on purpose, because refusing and preferring
+// are different decisions. Marker's 2% chooses between a text layer and OCR,
+// with OCR always available; anymd has no OCR, so at 2% the choice is between
+// imperfect text and nothing, and imperfect text wins. A real document met in
+// testing was 12% unreadable — a school report whose headings came through a
+// subset font as "6WXGHQW 3URJUHVV 5HSRUW" while the student's name and roll
+// number were perfectly correct. Refusing that loses the 88% that was right.
+// Only a page that is mostly nonsense has nothing worth keeping.
+const pdfRefuseBadGlyphShare = 0.30
+
+// pdfMinGlyphsForSoundness is the fewest glyphs a page must draw before its
+// bad-glyph share means anything. On a page holding six characters, one
+// private-use bullet is 17%.
+const pdfMinGlyphsForSoundness = 40
+
+// badShare is the fraction of this page's glyphs that decoded to nothing a
+// reader can use. It is zero for a page with too few glyphs to judge.
+func (pg pdfPage) badShare() float64 {
+	if pg.glyphs < pdfMinGlyphsForSoundness {
+		return 0
+	}
+	return float64(pg.badGlyphs) / float64(pg.glyphs)
+}
+
+// sound reports whether the page's text layer can be trusted as it stands.
+func (pg pdfPage) sound() bool { return pg.badShare() <= pdfMaxBadGlyphShare }
+
+// readable reports whether the page's text is worth emitting when there is no
+// vision model to read it instead.
+func (pg pdfPage) readable() bool { return pg.badShare() < pdfRefuseBadGlyphShare }
 
 // pdfMagic is the header every PDF starts with, at offset 0.
 const pdfMagic = "%PDF-"
@@ -87,14 +142,15 @@ func (c *PDFConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options) 
 		}
 	}()
 
-	// The raw bytes are only materialized when a Describer is present: image
-	// extraction needs the undecoded stream payloads, and with no Describer
-	// nothing will ever read them, so we keep the cheaper ReaderAt path and the
-	// exact behavior this converter has always had.
+	// The raw bytes are materialized whenever images are wanted, for inlining
+	// or for captioning: extracting one needs the undecoded stream payload,
+	// which the object graph cannot hand back for the filters that matter (a
+	// photograph is DCTDecode). Only a caller that has switched images off and
+	// supplied no Describer keeps the cheaper ReaderAt path.
 	var raw []byte
 	var ra io.ReaderAt
 	var size int64
-	if opts.HasDescriber() {
+	if opts.HasDescriber() || !opts.DropImages {
 		if raw, err = pdfReadAll(r); err != nil {
 			return Result{}, err
 		}
@@ -120,45 +176,130 @@ func (c *PDFConverter) Convert(r io.ReadSeeker, info StreamInfo, opts *Options) 
 	if n < 0 {
 		n = 0
 	}
-	blocks := make([]string, 0, 2*n)
+	// Pages are collected before anything is rendered, because the structure
+	// passes that matter most are document-wide: a running header is only
+	// recognisable as one across pages, and a hyphen is only recognisable as
+	// the author's once the whole document has been searched for the compound
+	// spelled out intact.
+	type pdfEntry struct {
+		page    pdfPage
+		caption string
+		built   bool
+	}
+	entries := make([]pdfEntry, 0, n)
 	budget := maxPDFGlyphs
 	var idx *pdfImageIndex            // built lazily, on the first text-free page
 	captions := map[[32]byte]string{} // sha256 -> caption, deduped per document
 	captioned, capped := 0, false
+	pagesWithText, unsound := 0, 0
 	for i := 1; i <= n; i++ {
 		page := doc.Page(i)
 		if page.V.IsNull() {
 			continue
 		}
-		text := pdfPageText(page, &budget)
-		if text == "" && opts.HasDescriber() && !capped {
-			// No text layer on this page. The pixels a scanner produced are
-			// still in the file as an embedded image; read those instead.
-			if idx == nil {
-				idx = pdfScanImages(raw)
+		if pg, ok := pdfBuildPage(page, &budget); ok && !pg.sound() {
+			// The page drew text the fonts cannot map back to characters.
+			// A vision model reads the pixels far better than this, so prefer
+			// one when the caller supplied it.
+			if opts.HasDescriber() && !capped {
+				if idx == nil {
+					idx = pdfScanImages(raw)
+				}
+				if captioned >= maxPDFCaptionedPages {
+					capped = true
+				} else if c := pdfDescribePage(idx.pageImages(page), i, captions, opts); c != "" {
+					entries = append(entries, pdfEntry{caption: c})
+					captioned++
+					continue
+				}
 			}
-			if captioned >= maxPDFCaptionedPages {
-				capped = true
-			} else if c := pdfDescribePage(idx.pageImages(page), i, captions, opts); c != "" {
-				text = c
-				captioned++
+			if !pg.readable() {
+				// Mostly nonsense, and nothing better to offer.
+				unsound++
+				continue
 			}
+			// Imperfect, but the readable part of it is real content and
+			// there is nothing else to give.
+			pagesWithText++
+			entries = append(entries, pdfEntry{page: pg, built: true})
+			continue
+		} else if ok {
+			// Figures on a page that also has text. These used to be dropped
+			// outright: the image path ran only for a page with no text at
+			// all, so a chart sitting in a report vanished, caption and all,
+			// with nothing to show it had ever been there.
+			if len(pg.imageRefs) > 0 && (!opts.DropImages || opts.HasDescriber()) {
+				if idx == nil {
+					idx = pdfScanImages(raw)
+				}
+				pg.images = idx.placedImages(page, pg.imageRefs)
+			}
+			pagesWithText++
+			entries = append(entries, pdfEntry{page: pg, built: true})
+			continue
 		}
-		if text == "" {
+		if !opts.HasDescriber() || capped {
 			// A page with no text (a scan, a full-bleed figure, a spacer) is
 			// skipped rather than emitted as an empty block.
 			continue
 		}
-		if len(blocks) > 0 {
+		// No text layer on this page. The pixels a scanner produced are still
+		// in the file as an embedded image; read those instead.
+		if idx == nil {
+			idx = pdfScanImages(raw)
+		}
+		if captioned >= maxPDFCaptionedPages {
+			capped = true
+			continue
+		}
+		if c := pdfDescribePage(idx.pageImages(page), i, captions, opts); c != "" {
+			entries = append(entries, pdfEntry{caption: c})
+			captioned++
+		}
+	}
+
+	pages := make([]pdfPage, 0, len(entries))
+	for _, e := range entries {
+		if e.built {
+			pages = append(pages, e.page)
+		}
+	}
+	rendered := pdfRenderDoc(pages, newImageBudget(opts), opts, pdfOutlineLevels(doc.Outline()))
+
+	blocks := make([]string, 0, 2*len(entries))
+	next := 0
+	for _, e := range entries {
+		if !e.built {
+			if e.caption == "" {
+				continue
+			}
+			if len(blocks) > 0 {
+				blocks = append(blocks, "---")
+			}
+			blocks = append(blocks, e.caption)
+			continue
+		}
+		page, joined := rendered.pages[next], rendered.joined[next]
+		next++
+		if len(page) == 0 {
+			continue
+		}
+		// A page that a table runs into gets no rule before it: the rule would
+		// land in the middle of the table it is continuing.
+		if len(blocks) > 0 && !joined {
 			blocks = append(blocks, "---")
 		}
-		blocks = append(blocks, text)
+		blocks = append(blocks, page...)
 	}
 	if capped && len(blocks) > 0 {
 		blocks = append(blocks, pdfCaptionCapNote)
 	}
 
 	if len(blocks) == 0 {
+		if unsound > 0 && pagesWithText == 0 {
+			// Every page that had text had text nothing could read.
+			return Result{}, ErrGarbledTextLayer
+		}
 		if encrypted {
 			// Decryption "succeeded" but produced nothing readable; that is an
 			// encryption problem, not a missing-text-layer one.
@@ -374,10 +515,12 @@ func pdfPageText(p pdf.Page, budget *int) (out string) {
 // one Convert into 500 requests; past the cap we stop and say so in the output.
 const maxPDFCaptionedPages = 20
 
-// minPDFImageBytes skips images too small to be a scanned page. A scan of a
-// sheet of paper is tens of kilobytes at minimum; anything under this is a
-// logo, a rule, a signature stamp or a compression artifact, and captioning it
-// costs a request to be told "a small blue square".
+// minPDFImageBytes skips images too small to be worth a vision-model call. A
+// scan of a sheet of paper is tens of kilobytes at minimum; anything under this
+// is a logo, a rule, a signature stamp or a compression artifact, and
+// captioning it costs a request to be told "a small blue square". It bounds
+// captioning only: inlining uses the much lower minInlineImageBytes, because
+// carrying a small picture into the Markdown costs almost nothing.
 const minPDFImageBytes = 4096
 
 // minPDFImageEdge is the same filter in pixels: a page scan is never 64px on a
@@ -423,6 +566,96 @@ type pdfRawImage struct {
 	parms  bool   // stream carries /DecodeParms (predictors etc.)
 	data   []byte
 	used   bool
+}
+
+// pdfPlacedImage is one image actually drawn on a page, with the area it was
+// drawn into. The rect is what lets it be put back where it belongs in the
+// reading order instead of being appended somewhere at the end.
+type pdfPlacedImage struct {
+	data []byte
+	mime string
+	rect pdf.Rect
+}
+
+// placedImages resolves the page's Do operators to decoded image bytes.
+//
+// It walks the placements rather than the resource dictionary, because those
+// are different things: a resource dictionary lists what a page COULD draw,
+// often including images it never uses, and says nothing about where. Only the
+// Do operator says an image was actually painted, and in what order.
+func (idx *pdfImageIndex) placedImages(p pdf.Page, refs []pdf.ImageRef) (out []pdfPlacedImage) {
+	defer func() {
+		// Resource resolution walks attacker-controlled pointers; a bad page
+		// yields no images rather than killing the document.
+		if recover() != nil {
+			out = nil
+		}
+	}()
+	if idx == nil || len(idx.images) == 0 || len(refs) == 0 || p.V.IsNull() {
+		return nil
+	}
+	xo := p.Resources().Key("XObject")
+	if xo.Kind() != pdf.Dict {
+		return nil
+	}
+	// One image drawn several times — a bullet, a rule, a repeated mark — is
+	// decoded once and reused at each placement.
+	decoded := map[string]*pdfPageImage{}
+	for _, ref := range refs {
+		img, seen := decoded[ref.Name]
+		if !seen {
+			img = idx.resolveImage(xo.Key(ref.Name), 0)
+			decoded[ref.Name] = img
+		}
+		if img == nil {
+			continue
+		}
+		out = append(out, pdfPlacedImage{data: img.data, mime: img.mime, rect: ref.Rect})
+	}
+	return out
+}
+
+// maxPDFFormDepth bounds how far a Form XObject may be followed. Forms nest,
+// and a malformed file can make them nest into each other, so the walk is
+// depth-limited rather than trusting the graph to terminate.
+const maxPDFFormDepth = 4
+
+// resolveImage returns the image an XObject paints, following Form XObjects to
+// reach it.
+//
+// A Form is the common case rather than the exotic one: reportlab, Word and
+// LibreOffice all wrap a picture in one, so a resolver that only accepts
+// /Subtype /Image finds nothing on most real documents. A form is a little
+// content stream of its own, and the image is inside its resources.
+func (idx *pdfImageIndex) resolveImage(v pdf.Value, depth int) *pdfPageImage {
+	if depth > maxPDFFormDepth || v.Kind() != pdf.Stream {
+		return nil
+	}
+	switch v.Key("Subtype").Name() {
+	case "Image":
+		raw := idx.take(v.Key("Width").Int64(), v.Key("Height").Int64(),
+			v.Key("BitsPerComponent").Int64(), v.Key("Length").Int64(),
+			pdfFilterOf(v))
+		if raw == nil {
+			return nil
+		}
+		if b, mime, ok := pdfDecodeImage(raw); ok {
+			return &pdfPageImage{data: b, mime: mime}
+		}
+	case "Form":
+		inner := v.Key("Resources").Key("XObject")
+		if inner.Kind() != pdf.Dict {
+			return nil
+		}
+		// Keys is sorted, so a form holding several images resolves to the
+		// same one on every run.
+		for _, name := range inner.Keys() {
+			if img := idx.resolveImage(inner.Key(name), depth+1); img != nil {
+				return img
+			}
+		}
+	}
+	return nil
 }
 
 // pdfPageImage is one decoded image from a page, ready for a Describer.
@@ -533,29 +766,119 @@ func pdfFilterOf(v pdf.Value) string {
 // colorspaces, and any bit depth other than 8. A skipped image is not an error;
 // the page simply produces no caption.
 func pdfDecodeImage(im *pdfRawImage) (data []byte, mime string, ok bool) {
-	if im == nil || len(im.data) < minPDFImageBytes ||
+	// The floor here is the inlining one, not the captioning one. A 2 KiB
+	// diagram is well worth carrying into the Markdown even though it would be
+	// a poor use of a vision-model call; the caller that pays for captions
+	// applies its own, larger floor.
+	if im == nil || len(im.data) < minInlineImageBytes ||
 		im.width < minPDFImageEdge || im.height < minPDFImageEdge {
 		return nil, "", false
 	}
-	switch im.filter {
+	// A stream's /Filter is a chain, not a single name. The image codec is the
+	// last entry; everything before it is transport encoding, there to keep the
+	// bytes printable inside the file. Matching the whole chain as one string
+	// means a perfectly ordinary "ASCII85Decode,DCTDecode" photograph — which
+	// is what reportlab and several other producers emit — matches no case at
+	// all and is silently skipped.
+	data, filter, ok := pdfUndoTransport(im.data, im.filter)
+	if !ok {
+		return nil, "", false
+	}
+	switch filter {
 	case "DCTDecode":
-		return im.data, "image/jpeg", true
+		return data, "image/jpeg", true
 	case "JPXDecode":
-		return im.data, "image/jp2", true
+		return data, "image/jp2", true
 	case "FlateDecode", "":
 		if im.parms {
 			return nil, "", false // a predictor we are not going to guess at
 		}
-		samples := im.data
-		if im.filter == "FlateDecode" {
+		samples := data
+		if filter == "FlateDecode" {
 			var err error
-			if samples, err = pdfInflate(im.data); err != nil {
+			if samples, err = pdfInflate(samples); err != nil {
 				return nil, "", false
 			}
 		}
 		return pdfSamplesToPNG(samples, im.width, im.height, im.bpc, im.cs)
 	}
 	return nil, "", false
+}
+
+// pdfUndoTransport strips the transport filters from the front of a filter
+// chain, returning the payload and the image codec that remains.
+//
+// ok is false for a chain this package cannot unwrap — an LZW or run-length
+// stage — so the caller skips the image instead of handing a decoder bytes that
+// are still encoded.
+func pdfUndoTransport(data []byte, chain string) ([]byte, string, bool) {
+	parts := strings.Split(chain, ",")
+	for len(parts) > 1 {
+		switch parts[0] {
+		case "ASCII85Decode":
+			out, err := io.ReadAll(ascii85.NewDecoder(bytes.NewReader(pdfTrimASCII85(data))))
+			if err != nil {
+				return nil, "", false
+			}
+			data = out
+		case "ASCIIHexDecode":
+			out, err := pdfDecodeASCIIHex(data)
+			if err != nil {
+				return nil, "", false
+			}
+			data = out
+		default:
+			return nil, "", false
+		}
+		parts = parts[1:]
+	}
+	return data, parts[0], true
+}
+
+// pdfTrimASCII85 removes the optional <~ and ~> wrappers, which Go's decoder
+// does not accept.
+func pdfTrimASCII85(b []byte) []byte {
+	b = bytes.TrimSpace(b)
+	b = bytes.TrimPrefix(b, []byte("<~"))
+	if i := bytes.Index(b, []byte("~>")); i >= 0 {
+		b = b[:i]
+	}
+	return b
+}
+
+// pdfDecodeASCIIHex decodes a hex-encoded stream, stopping at the > terminator
+// and ignoring the whitespace a producer may have wrapped the lines with.
+func pdfDecodeASCIIHex(b []byte) ([]byte, error) {
+	out := make([]byte, 0, len(b)/2)
+	var hi int = -1
+	for _, c := range b {
+		if c == '>' {
+			break
+		}
+		var v int
+		switch {
+		case c >= '0' && c <= '9':
+			v = int(c - '0')
+		case c >= 'a' && c <= 'f':
+			v = int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			v = int(c-'A') + 10
+		case isPDFSpace(c):
+			continue
+		default:
+			return nil, errors.New("bad ascii-hex stream")
+		}
+		if hi < 0 {
+			hi = v
+			continue
+		}
+		out = append(out, byte(hi<<4|v))
+		hi = -1
+	}
+	if hi >= 0 { // an odd trailing digit pairs with zero, per the spec
+		out = append(out, byte(hi<<4))
+	}
+	return out, nil
 }
 
 // pdfInflate decompresses a FlateDecode stream under a hard output cap, so a
@@ -1170,11 +1493,103 @@ func pdfSplitColumns(lines []pdfLine) [][]pdfLine {
 			cuts[i] = found[i].mid
 		}
 		sort.Float64s(cuts)
+		if pdfLooksLikeTableGrid(lines, cuts, med) {
+			continue
+		}
 		if groups := pdfGroupColumns(lines, cuts, width, med); groups != nil {
 			return groups
 		}
 	}
 	return nil
+}
+
+// pdfLooksLikeTableGrid reports that a candidate gutter runs between the cells
+// of a table rather than between two columns of text.
+//
+// Two signals have to agree, because either alone is wrong.
+//
+// The first is shared baselines. Two columns of prose are independent flows: a
+// line in the left column rarely sits at exactly the height of one in the
+// right. A table is the opposite by definition — a row IS a shared baseline.
+// But this signal alone rejects real side-by-side layouts, which are commonly
+// set on a shared grid, so it cannot decide on its own.
+//
+// The second is fill. Prose runs to the end of its measure and starts again;
+// most of its lines end near the column's right edge. A table cell holds a
+// label or a figure and stops wherever it stops. So a region whose rows share
+// baselines AND whose lines do not reach their column edges is a table, and
+// cutting it at the gutter would read the table down its columns, divorcing
+// every figure from the row it belongs to.
+func pdfLooksLikeTableGrid(lines []pdfLine, cuts []float64, med float64) bool {
+	if len(cuts) == 0 || med <= 0 {
+		return false
+	}
+	type span struct{ lo, hi int }
+	rows := map[int]*span{}
+	for _, l := range lines {
+		// Bucket by baseline at half the median size: tight enough that two
+		// different lines never share a bucket, loose enough that one row's
+		// cells, set in slightly different fonts, do.
+		key := int(l.yTop / (0.5 * med))
+		c := pdfColumnOf(l.x0, cuts)
+		r, ok := rows[key]
+		if !ok {
+			rows[key] = &span{c, c}
+			continue
+		}
+		if c < r.lo {
+			r.lo = c
+		}
+		if c > r.hi {
+			r.hi = c
+		}
+	}
+	shared := 0
+	for _, r := range rows {
+		if r.hi > r.lo {
+			shared++
+		}
+	}
+	if len(rows) == 0 || shared*3 < len(rows) {
+		return false
+	}
+
+	// Fill, measured per side of every cut.
+	groups := make([][]pdfLine, len(cuts)+1)
+	for _, l := range lines {
+		c := pdfColumnOf(l.x0, cuts)
+		groups[c] = append(groups[c], l)
+	}
+	for _, g := range groups {
+		if len(g) < 2 {
+			continue
+		}
+		gx0, gx1 := g[0].x0, g[0].x1
+		for _, l := range g[1:] {
+			if l.x0 < gx0 {
+				gx0 = l.x0
+			}
+			if l.x1 > gx1 {
+				gx1 = l.x1
+			}
+		}
+		w := gx1 - gx0
+		if w <= 0 {
+			continue
+		}
+		full := 0
+		for _, l := range g {
+			if l.x1-gx0 >= 0.75*w {
+				full++
+			}
+		}
+		// One side that reads like prose is enough to keep the cut: a page
+		// with a figure beside a column of text is still a two-column page.
+		if full*2 >= len(g) {
+			return false
+		}
+	}
+	return true
 }
 
 // pdfGroupColumns applies one candidate set of cuts and returns the columns it
