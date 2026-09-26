@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF to Markdown, side by side</title>
+<meta name="description" content="One ordinary office PDF converted by Microsoft markitdown and by anymd, shown next to the source.">
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<style>
+:root{--bg:#fbfbfa;--panel:#fff;--ink:#1a1a18;--muted:#6b6b66;--line:#e3e3df;
+ --good:#1f6f43;--good-bg:#eaf6ef;--mid:#8a5a1a;--mid-bg:#fdf3e4;--bad:#a8342c;}
+:root:not([data-theme="light"]){@media(prefers-color-scheme:dark){:root{
+ --bg:#141414;--panel:#1c1c1b;--ink:#eceae4;--muted:#9a978f;--line:#333230;
+ --good:#6fd39b;--good-bg:#16301f;--mid:#d9a95e;--mid-bg:#2c2313;--bad:#f0938a;}}}
+:root[data-theme="dark"]{--bg:#141414;--panel:#1c1c1b;--ink:#eceae4;--muted:#9a978f;--line:#333230;
+ --good:#6fd39b;--good-bg:#16301f;--mid:#d9a95e;--mid-bg:#2c2313;--bad:#f0938a;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+ font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+ height:100vh;display:flex;flex-direction:column;overflow:hidden}
+header{padding:12px 16px 10px;border-bottom:1px solid var(--line);flex:none}
+.top{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+h1{margin:0;font-size:16px;letter-spacing:-.01em}
+h1 small{font-weight:400;color:var(--muted);font-size:13px;margin-left:8px}
+a{color:inherit}
+.back{font-size:12.5px;color:var(--muted);text-decoration:none;border-bottom:1px solid var(--line)}
+.blurb{margin:6px 0 0;font-size:12.5px;color:var(--muted);max-width:115ch}
+.scores{display:flex;gap:18px;flex-wrap:wrap;margin:9px 0 0;font-size:12.5px;color:var(--muted)}
+.scores b{font-variant-numeric:tabular-nums}
+.win{color:var(--good)}.lose{color:var(--bad)}
+main{flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);min-height:0}
+section{background:var(--panel);display:flex;flex-direction:column;min-width:0;min-height:0}
+.head{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:8px;flex:none}
+.head strong{font-size:13px}.head span{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.tag{font-size:10.5px;padding:1px 6px;border-radius:4px;background:var(--line);color:var(--muted)}
+section.a .tag{background:var(--good-bg);color:var(--good)}
+.body{flex:1;overflow:auto;min-height:0}
+iframe{width:100%;height:100%;border:0;display:block;background:#555}
+.md{padding:14px 16px;font-size:13.5px;line-height:1.6;overflow-wrap:break-word}
+.md h1,.md h2,.md h3{line-height:1.25;margin:1.25em 0 .45em;background:var(--good-bg);color:var(--good);
+ display:inline-block;padding:1px 7px;border-radius:4px;font-size:1.02em}
+.md table{border-collapse:collapse;margin:.9em 0;font-size:12px;width:100%}
+.md th,.md td{border:1px solid var(--line);padding:3px 7px;text-align:left}
+.md th{background:var(--mid-bg);color:var(--mid)}
+.md ul,.md ol{padding-left:1.35em;margin:.5em 0}
+.md li::marker{color:var(--mid)}
+.md hr{border:0;border-top:1px dashed var(--line);margin:1.4em 0}
+.md p{margin:.6em 0}
+.plain .md{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px}
+footer{flex:none;padding:8px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);
+ display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+label{display:flex;gap:5px;align-items:center;cursor:pointer}
+@media(max-width:1000px){main{grid-template-columns:1fr;overflow:auto}section{min-height:70vh}body{height:auto;overflow:auto}}
+</style>
+</head>
+<body>
+<header>
+ <div class="top">
+  <h1>One ordinary PDF, converted twice <small>source &middot; Microsoft markitdown 0.1.5 &middot; anymd 0.3.1</small></h1>
+  <a class="back" href="/anymd/benchmarks/">&larr; back to the benchmarks</a>
+ </div>
+ <p class="blurb">A plain office document &mdash; title, five numbered sections, two bulleted lists, a numbered list and a
+  five-column table &mdash; written as HTML and exported to PDF by LibreOffice, which is how most business PDFs are
+  actually made. Neither converter has seen it before, and the document was not written to suit either one.</p>
+ <div class="scores" id="scores"></div>
+</header>
+<main>
+ <section><div class="head"><strong>The PDF</strong><span>report.pdf</span></div>
+  <div class="body"><iframe id="pdf" src="report.pdf#view=FitH" title="the source PDF"></iframe></div></section>
+ <section id="mkSec"><div class="head"><strong>markitdown</strong><span id="mkStat"></span><span class="tag">pdfminer.six</span></div>
+  <div class="body"><div class="md" id="mk"></div></div></section>
+ <section id="anSec" class="a"><div class="head"><strong>anymd</strong><span id="anStat"></span><span class="tag">structure recovery</span></div>
+  <div class="body"><div class="md" id="an"></div></div></section>
+</main>
+<footer>
+ <label><input type="checkbox" id="raw"> raw Markdown instead of rendered</label>
+ <label><input type="checkbox" id="sync" checked> sync scrolling</label>
+ <span>Regenerate with <code>bench/compare/build.sh</code>.</span>
+</footer>
+<script>
+const $=s=>document.querySelector(s);
+marked.setOptions({gfm:true});
+let src={};
+function score(label,a,m,truth){
+ const cls=a===truth&&m!==truth?'win':(m===truth&&a!==truth?'lose':(a>m?'win':(m>a?'lose':'')));
+ return `<span>${label} <b class="${cls}">${a}</b> vs <b>${m}</b> <span style="opacity:.7">(document has ${truth})</span></span>`;
+}
+async function render(){
+ const raw=$('#raw').checked;
+ $('#mk')[raw?'textContent':'innerHTML']=raw?src.mk:marked.parse(src.mk);
+ $('#an')[raw?'textContent':'innerHTML']=raw?src.an:marked.parse(src.an);
+ $('#mkSec').classList.toggle('plain',raw);$('#anSec').classList.toggle('plain',raw);
+}
+let lock=false;
+function link(a,b){a.addEventListener('scroll',()=>{if(!$('#sync').checked||lock)return;lock=true;
+ const r=a.scrollTop/Math.max(1,a.scrollHeight-a.clientHeight);b.scrollTop=r*(b.scrollHeight-b.clientHeight);
+ requestAnimationFrame(()=>lock=false);});}
+(async()=>{
+ const [st,mk,an]=await Promise.all([
+  fetch('stats.json').then(r=>r.json()),
+  fetch('report.markitdown.md').then(r=>r.text()),
+  fetch('report.anymd.md').then(r=>r.text())]);
+ src={mk,an};
+ const a=st.anymd,m=st.markitdown,d=st.document;
+ $('#scores').innerHTML=[score('markdown headings',a.headings,m.headings,d.headings),
+  score('list items',a.lists,m.lists,d.lists),
+  score('table rows',a.rows,m.rows,d.rows),
+  `<span>bytes <b>${a.bytes.toLocaleString()}</b> vs <b>${m.bytes.toLocaleString()}</b></span>`].join('');
+ $('#mkStat').textContent=m.bytes.toLocaleString()+' bytes';
+ $('#anStat').textContent=a.bytes.toLocaleString()+' bytes';
+ const p=[...document.querySelectorAll('#mkSec .body, #anSec .body')];link(p[0],p[1]);link(p[1],p[0]);
+ $('#raw').addEventListener('change',render);
+ render();
+})();
+</script>
+</body>
+</html>

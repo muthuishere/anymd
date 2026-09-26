@@ -95,6 +95,11 @@ const (
 	// sentence that happens to be set large is a pull quote, not a section.
 	pdfHeadingMaxChars = 150
 
+	// pdfSentenceWords is how many words after a list marker make the line a
+	// sentence rather than a numbered title. Six clears the longest headings
+	// that end in a full stop while catching the shortest real list items.
+	pdfSentenceWords = 6
+
 	// pdfFurnitureBand is the fraction of page height, top and bottom, inside
 	// which a repeated line is treated as a running header or footer. It is
 	// measured from the edge of the paper, so it is the printing margin: a
@@ -411,5 +416,40 @@ func pdfHasRuling(rects []pdf.Rect) bool {
 			n++
 		}
 	}
-	return n >= 3
+	return n >= 3 || pdfHasShadedBand(rects)
+}
+
+// pdfHasShadedBand reports a row of filled cells sharing one horizontal band —
+// a shaded header, which is a table's other way of drawing itself.
+//
+// A rule is a thin rectangle, and looking only for those misses every document
+// whose borders are stroked paths rather than filled boxes: LibreOffice and
+// Word both emit a bordered table that way, so a perfectly ordinary report
+// reaches the table pass with no ruling evidence at all. The shading is still
+// there, though, because a header band is a fill, and three or more fills
+// standing side by side in the same band are a header row and nothing else.
+//
+// Three, not pdfMinTableCols: two boxes abreast are a diagram as often as they
+// are a table, and this is the same bar the thin-rule count above sets.
+func pdfHasShadedBand(rects []pdf.Rect) bool {
+	bands := map[int]int{}
+	for _, r := range rects {
+		w := r.Max.X - r.Min.X
+		h := r.Max.Y - r.Min.Y
+		// A cell, not a rule, not the page: wide enough to hold a word, short
+		// enough to be one row, and not the full width of the sheet.
+		if w < 15 || w > 400 || h < 4 || h > 60 {
+			continue
+		}
+		// Bands are keyed on the rounded top edge, so cells that differ by a
+		// fraction of a point — which they do, once a border width is added
+		// to one of them — still land together.
+		bands[int(r.Max.Y+0.5)]++
+	}
+	for _, n := range bands {
+		if n >= 3 {
+			return true
+		}
+	}
+	return false
 }

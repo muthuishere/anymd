@@ -14,6 +14,28 @@ treated as stable from `0.1.0` onward.
 
 ### Fixed
 
+- **A numbered list became a run of headings.** `1. Move the appointment
+  windows to two hours.` was emitted as `## 1. Move the appointment...`: a
+  numbered line standing alone between blank lines is exactly what a numbered
+  section title looks like, and numbering and isolation were the whole of the
+  evidence. A heading is a label and a list item is a statement, so a numbered
+  line that closes with terminal punctuation and runs past a few words is now
+  left as a list item. Set at heading size it is still a heading; the test
+  guards only the body-size branch, where the number was the only signal.
+
+- **Table rows fell out of the table when a cell wrapped.** anymd decided a
+  page carried a ruled table by looking for thin rectangles, and LibreOffice
+  and Word both draw an ordinary bordered table with stroked paths, which
+  leave none — so a perfectly normal report reached the table pass with no
+  ruling evidence at all, and the run stopped at the first line that did not
+  split into cells. The shaded header cells *are* fills, so three or more of
+  them standing side by side in one horizontal band now count as ruling too.
+  On the report this was found with, two rows — a depot whose name wrapped,
+  and the totals row — had been dropped out of the table as loose text.
+
+  Across the 130-document quality benchmark the pair changed exactly one
+  score, PDF lists from 0.46 to 0.47, and left the other 129 byte-identical.
+
 - **Two different images could share one inlined payload.** The dedup key
   began with the byte length written as `string(rune(n))`, and a rune
   conversion is not injective: every length in the surrogate range

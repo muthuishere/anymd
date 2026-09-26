@@ -516,6 +516,19 @@ func pdfHeadingLevel(l pdfTextLine, body, top float64, lines []pdfTextLine, i in
 	num := pdfSectionNumber.FindString(text)
 	big := l.size >= pdfHeadingRatio*body
 
+	// A numbered line that reads as a sentence is an ordered list item, not a
+	// heading. Both open with "1." and both sit alone between blank lines, so
+	// numbering and isolation cannot separate them — but a heading is a label
+	// and a list item is a statement, and a statement ends in a full stop and
+	// runs to a clause or two. Without this, every numbered recommendation in
+	// a report is promoted to a section of its own and the outline fills with
+	// prose. Set at heading size it is still a heading: the test only guards
+	// the body-size branch below, where the number is the whole of the
+	// evidence.
+	if num != "" && !big && pdfReadsAsSentence(text[len(num):]) {
+		return 0, false
+	}
+
 	switch {
 	case big:
 		// Rank by how far above the body the line is set, so a title outranks
@@ -561,6 +574,18 @@ func pdfHeadingLevel(l pdfTextLine, body, top float64, lines []pdfTextLine, i in
 		return pdfClampLevel(2), true
 	}
 	return 0, false
+}
+
+// pdfReadsAsSentence reports whether what follows a list marker is a sentence
+// rather than a title: it closes with terminal punctuation and is long enough
+// that the punctuation is not an abbreviation. "Summary" is not, "Move the
+// appointment windows from three hours to two, starting in November." is.
+func pdfReadsAsSentence(rest string) bool {
+	rest = strings.TrimSpace(rest)
+	if !strings.HasSuffix(rest, ".") && !strings.HasSuffix(rest, "!") && !strings.HasSuffix(rest, "?") {
+		return false
+	}
+	return len(strings.Fields(rest)) >= pdfSentenceWords
 }
 
 // pdfNumberDepth reads the depth out of a section number: "2." is depth one,

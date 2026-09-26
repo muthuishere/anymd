@@ -62,7 +62,10 @@ export default defineConfig({
 				},
 				{
 					label: 'Evidence',
-					items: [{ label: 'Benchmarks', slug: 'benchmarks' }],
+					items: [
+						{ label: 'Benchmarks', slug: 'benchmarks' },
+						{ label: 'Side by side', slug: 'side-by-side' },
+					],
 				},
 			],
 		}),

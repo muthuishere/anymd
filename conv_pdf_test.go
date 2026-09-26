@@ -13,6 +13,8 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
+
+	"github.com/muthuishere/anymd/internal/pdf"
 )
 
 // buildPDF writes a real, structurally valid single- or multi-page PDF: a
@@ -1427,5 +1429,60 @@ func TestPDFFlatOutlineDoesNotFlattenHeadings(t *testing.T) {
 	}
 	if !strings.Contains(res.Markdown, "## 1.1 Materials") {
 		t.Errorf("flat outline flattened the hierarchy: %q", res.Markdown)
+	}
+}
+
+// A numbered sentence is a list item; a numbered title is a heading. The two
+// are indistinguishable by numbering and by isolation, which is what the
+// classifier had to go on before pdfReadsAsSentence.
+func TestPdfNumberedSentenceIsNotAHeading(t *testing.T) {
+	const body = 11
+	cases := []struct {
+		name    string
+		text    string
+		heading bool
+	}{
+		{"numbered title", "1. Summary", true},
+		{"nested numbered title", "2.1 What improved", true},
+		{"numbered sentence", "1. Move afternoon appointment windows from three hours to two, starting in November.", false},
+		{"numbered sentence, no trailing stop", "2. Run a stock reconciliation at Calder Vale", true},
+		{"short numbered phrase ending in a stop", "3. Roles.", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := []pdfTextLine{{text: "prose above", size: body, y: 120}, {text: tc.text, size: body, y: 100}, {text: "prose below", size: body, y: 40}}
+			_, got := pdfHeadingLevel(lines[1], body, 0, lines, 1, nil)
+			if got != tc.heading {
+				t.Fatalf("pdfHeadingLevel(%q) heading = %v, want %v", tc.text, got, tc.heading)
+			}
+		})
+	}
+}
+
+// A table whose borders are stroked paths leaves no thin rectangles behind, so
+// the only fills on the page are its shaded header cells. Word and LibreOffice
+// both emit ordinary bordered tables that way.
+func TestPdfHasRulingFromShadedHeader(t *testing.T) {
+	page := pdf.Rect{Max: pdf.Point{X: 595, Y: 842}}
+	header := []pdf.Rect{
+		{Min: pdf.Point{X: 64, Y: 376}, Max: pdf.Point{X: 165, Y: 401}},
+		{Min: pdf.Point{X: 180, Y: 376}, Max: pdf.Point{X: 243, Y: 401}},
+		{Min: pdf.Point{X: 258, Y: 376}, Max: pdf.Point{X: 353, Y: 401}},
+		{Min: pdf.Point{X: 367, Y: 376}, Max: pdf.Point{X: 453, Y: 401}},
+	}
+	if !pdfHasRuling(append([]pdf.Rect{page}, header...)) {
+		t.Fatal("a shaded header row of four cells is table ruling, want true")
+	}
+	if pdfHasRuling([]pdf.Rect{page, header[0], header[1]}) {
+		t.Fatal("two fills are not a header row, want false")
+	}
+	// Fills scattered down the page, one per band, are illustrations.
+	var scattered []pdf.Rect
+	for i := 0; i < 6; i++ {
+		y := float64(100 + i*60)
+		scattered = append(scattered, pdf.Rect{Min: pdf.Point{X: 64, Y: y}, Max: pdf.Point{X: 200, Y: y + 40}})
+	}
+	if pdfHasRuling(append([]pdf.Rect{page}, scattered...)) {
+		t.Fatal("one fill per band is not a table, want false")
 	}
 }

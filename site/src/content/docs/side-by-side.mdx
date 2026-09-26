@@ -1,0 +1,117 @@
+---
+title: Side by side
+description: One ordinary office PDF, converted by Microsoft markitdown and by anymd, shown next to the source document.
+sidebar:
+  order: 8
+---
+
+import { Aside, LinkCard, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
+
+The [benchmark page](/anymd/benchmarks/) scores 130 documents and reports averages.
+Averages are the right way to decide, and a poor way to see. So here is one
+document, converted by both tools, next to the PDF it came from.
+
+<LinkCard
+  title="Open the three-pane comparison"
+  href="/anymd/compare/"
+  description="The source PDF, markitdown's Markdown and anymd's Markdown, rendered live, with a toggle for the raw text." />
+
+## The document
+
+A field service operations review: a title, five numbered sections, two
+bulleted lists, a numbered list of recommendations, and a five-column table
+with a shaded header. It is written as HTML and exported to PDF by LibreOffice
+— which is how most business PDFs are actually made — by
+[`bench/compare/build.sh`](https://github.com/muthuishere/anymd/blob/main/bench/compare/build.sh),
+so anyone can regenerate every file on this page.
+
+Nothing about it is chosen to suit anymd. It is what a report looks like.
+
+## What comes back
+
+| | anymd | markitdown | the document has |
+|---|---:|---:|---:|
+| Markdown headings | **8** | 0 | 8 |
+| list items | **8** | 8 | 8 |
+| table rows | 12 | 12 | 7 |
+| bytes | 1,844 | 2,042 | |
+
+**markitdown emits no headings at all.** Not wrong ones — none. `1. Summary`,
+`2. Findings` and `2.1 What improved` all arrive as ordinary paragraph text,
+indistinguishable from the prose around them:
+
+<Tabs>
+<TabItem label="markitdown">
+```markdown
+Field Service Operations Review
+Northern Region · Third Quarter 2026 · Prepared by Operations Planning
+1. Summary
+Service volume in the Northern Region rose through the quarter while the average time to close a ticket fell for
+the third consecutive reporting period.
+2. Findings
+2.1 What improved
+• First-visit resolution rose to 82%, up from 74% in the second quarter.
+```
+</TabItem>
+<TabItem label="anymd">
+```markdown
+# Field Service Operations Review
+
+Northern Region · Third Quarter 2026 · Prepared by Operations Planning
+
+# 1. Summary
+
+Service volume in the Northern Region rose through the quarter while the average time to close a ticket fell for the third consecutive reporting period.
+
+# 2. Findings
+
+## 2.1 What improved
+
+- First-visit resolution rose to 82%, up from 74% in the second quarter.
+```
+</TabItem>
+</Tabs>
+
+Two differences beyond the `#` characters. anymd rejoins the wrapped line into
+one paragraph, where markitdown preserves the typesetter's line break — a
+single newline inside a Markdown paragraph is not a line break, so that text
+reflows either way, but it makes the source diff noisy and breaks any tool
+matching on sentences. And the bullet is a `-` list item rather than a `•`
+character in a paragraph, so it survives as a list into whatever renders it
+next.
+
+This matters most for the thing both tools usually feed: a retrieval index.
+The heading is what makes a chunk findable, and chunk-by-heading is not
+available on output that has none.
+
+## Where this document still catches anymd out
+
+The table. Both tools emit 12 rows where the document has 7, because four of
+the header cells wrap onto a second line (`Mean time to` / `close`) and so does
+one depot name (`Eastgate (opened` / `May)`). A wrapped cell becomes a second
+row in both tools' output.
+
+<Aside type="note" title="This document found two real bugs, which are fixed">
+Writing this page is what caught them, which is the argument for having it:
+
+- **The numbered list became headings.** `1. Move afternoon appointment
+  windows…` was emitted as `## 1. Move afternoon…`, because a numbered line
+  standing alone between blank lines looks exactly like a numbered section
+  title. anymd now asks whether the line *reads as a sentence* — terminal
+  punctuation and more than a few words — and leaves those as list items.
+- **Two table rows fell out of the table.** anymd looked for thin rectangles
+  to decide a page had a ruled table, and LibreOffice draws its borders as
+  stroked paths, leaving none. The shaded header cells *are* filled
+  rectangles, though, so three or more fills side by side in one band now
+  count as a table's ruling. Before the fix, "Eastgate" and "Region total"
+  were dropped out of the table as loose text.
+
+Both shipped in 0.3.1. Across the 130-document benchmark the pair changed
+exactly one score — PDF lists, 0.46 to 0.47 — and left the other 129
+documents byte-identical.
+</Aside>
+
+<CardGrid>
+	<LinkCard title="Benchmarks" href="/anymd/benchmarks/#pdf-head-to-head" description="The measured version: 15 PDFs, five metrics, and the case anymd loses." />
+	<LinkCard title="Formats" href="/anymd/formats/#pdf--pdf" description="What anymd extracts from a PDF, and what it still does not." />
+</CardGrid>

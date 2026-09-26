@@ -151,12 +151,12 @@ and headings as anymd's **largest remaining gap**:
 | order | **0.83** | 0.74 | 0.77 |
 | tables | **0.69** | 0.56 | 0.43 |
 | headings | **0.59** | 0.20 | 0.14 |
-| lists | **0.46** | 0.42 | 0.44 |
+| lists | **0.47** | 0.42 | 0.44 |
 
 anymd now leads every PDF metric. Headings went from losing 0.14 to 0.20 to
 winning 0.59 to 0.20, and tables from 0.43 to 0.69, which is the gap that page
 called a missing feature rather than a tuning problem. `lists` is the honest
-weak spot: 0.46 against 0.42 is a win by a nose, and several corpus PDFs still
+weak spot: 0.47 against 0.42 is a win by a nose, and several corpus PDFs still
 score 0.00 on it.
 
 ### Speed
@@ -288,7 +288,7 @@ rounding difference.
 | md | 10 | 0.97 / 0.97 | 0.97 / 0.97 | 0.87 / 0.87 | 0.92 / 0.92 | 0.78 / 0.78 |
 | md_deepseek | 3 | 0.90 / 0.90 | 0.90 / 0.90 | 0.67 / 0.67 | 1.00 / 1.00 | 1.00 / 1.00 |
 | odf (as pdf) | 6 | 0.64 / **0.94** | 0.61 / **0.82** | 0.31 / **0.38** | **0.67** / 0.17 | **0.67** / 0.56 |
-| pdf | 15 | **0.94** / 0.90 | **0.83** / 0.74 | **0.69** / 0.56 | **0.59** / 0.20 | **0.46** / 0.42 |
+| pdf | 15 | **0.94** / 0.90 | **0.83** / 0.74 | **0.69** / 0.56 | **0.59** / 0.20 | **0.47** / 0.42 |
 | pptx | 8 | 0.79 / 0.82 | 0.78 / 0.82 | **0.98** / 0.95 | **1.00** / 0.86 | **1.00** / 0.57 |
 | uspto | 1 | 0.54 / 0.54 | 0.54 / 0.54 | 1.00 / 1.00 | 0.00 / 0.00 | 0.00 / 0.00 |
 | xls | 1 | **0.95** / 0.68 | **0.95** / 0.68 | **1.00** / 0.41 | 1.00 / 1.00 | 1.00 / 1.00 |
@@ -365,6 +365,7 @@ It also says nothing about formats docling ships no pairs for: rss, msg, zip,
 ipynb, and images.
 
 <CardGrid>
-	<LinkCard title="Formats" href="/anymd/formats/" description="What is extracted per format — including the PDF gaps this page measures." />
+	<LinkCard title="Side by side" href="/anymd/side-by-side/" description="The same comparison on one ordinary office PDF, rendered next to the source." />
+	<LinkCard title="Formats" href="/anymd/formats/" description="What is extracted per format — including the PDF structure this page measures." />
 	<LinkCard title="Caching" href="/anymd/cache/" description="The other set of measured numbers: when a cache hit is cheaper than converting." />
 </CardGrid>
