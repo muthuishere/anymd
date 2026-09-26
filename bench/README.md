@@ -13,7 +13,7 @@ Every number below came from that script. Where markitdown wins, it says so.
 | | |
 |---|---|
 | Machine | Apple M5 Pro (darwin/arm64), macOS 25.4 |
-| anymd | v0.1.0, Go 1.26 |
+| anymd | v0.3.0 for quality and the PDF head-to-head; v0.1.0 for the speed and memory tables, which 0.3.0 did not touch except on PDF. Go 1.26 |
 | markitdown | 0.1.5, Python 3.12.13, `markitdown[all]` (pdfminer.six 20260107) |
 | Corpus | the 31 files in markitdown's own test suite |
 
@@ -184,8 +184,11 @@ failure, and it scores 0 like any other miss.
 
 ### Results
 
-130 documents, anymd v0.1.0 against markitdown 0.1.5. Bold marks the winner
+130 documents, anymd v0.3.0 against markitdown 0.1.5. Bold marks the winner
 where the gap is more than a rounding difference.
+
+Reproduce with `./bench/run-quality.sh <docling checkout>`; add `--format pdf`
+for the PDF rows alone.
 
 | format | n | content | order | tables | headings | lists |
 |---|---:|---:|---:|---:|---:|---:|
@@ -194,24 +197,16 @@ where the gap is more than a rounding difference.
 | epub | 1 | 1.00 / 0.99 | 1.00 / 0.99 | 1.00 / 1.00 | 1.00 / 1.00 | 1.00 / 1.00 |
 | html | 32 | **0.97** / 0.96 | **0.97** / 0.96 | **0.99** / 0.98 | 1.00 / 1.00 | 0.94 / 0.94 |
 | md | 10 | 0.97 / 0.97 | 0.97 / 0.97 | 0.87 / 0.87 | 0.92 / 0.92 | 0.78 / 0.78 |
-| odf (as pdf) | 6 | 0.64 / **0.94** | 0.60 / **0.82** | 0.17 / **0.38** | 0.17 / 0.17 | 0.56 / 0.56 |
-| pdf | 15 | 0.87 / 0.90 | **0.77** / 0.74 | 0.43 / **0.56** | 0.14 / 0.20 | 0.44 / 0.42 |
-| pptx | 8 | 0.80 / 0.82 | 0.77 / 0.82 | **0.98** / 0.95 | **1.00** / 0.86 | 0.56 / 0.57 |
+| md_deepseek | 3 | 0.90 / 0.90 | 0.90 / 0.90 | 0.67 / 0.67 | 1.00 / 1.00 | 1.00 / 1.00 |
+| odf (as pdf) | 6 | 0.64 / **0.94** | 0.61 / **0.82** | 0.31 / **0.38** | **0.67** / 0.17 | **0.67** / 0.56 |
+| pdf | 15 | **0.94** / 0.90 | **0.83** / 0.74 | **0.69** / 0.56 | **0.59** / 0.20 | **0.46** / 0.42 |
+| pptx | 8 | 0.79 / 0.82 | 0.78 / 0.82 | **0.98** / 0.95 | **1.00** / 0.86 | **1.00** / 0.57 |
+| uspto | 1 | 0.54 / 0.54 | 0.54 / 0.54 | 1.00 / 1.00 | 0.00 / 0.00 | 0.00 / 0.00 |
 | xls | 1 | **0.95** / 0.68 | **0.95** / 0.68 | **1.00** / 0.41 | 1.00 / 1.00 | 1.00 / 1.00 |
 | xlsx | 11 | **0.98** / 0.68 | **0.98** / 0.65 | **0.99** / 0.60 | 1.00 / 1.00 | 1.00 / 1.00 |
-| **all** | **130** | **0.92** / 0.91 | **0.91** / 0.88 | **0.87** / 0.85 | **0.84** / 0.82 | **0.83** / 0.82 |
+| **all** | **130** | **0.93** / 0.91 | **0.92** / 0.88 | **0.91** / 0.85 | **0.91** / 0.82 | **0.86** / 0.82 |
 
-anymd leads every aggregate metric. The spreadsheet lead is decisive — xlsx
-content **0.98 against 0.68**, tables **0.99 against 0.60**. It still trails on
-`odf` (which routes through the PDF converter), on PDF content, and on PDF
-tables and headings, where anymd emits almost none: `out_tables: 0` on every
-PDF is a missing feature, not a tuning problem, and it is the largest remaining
-gap on this benchmark.
-
-These numbers are unchanged by the vendored PDF parser of
-[ADR 0002](../docs/adr/0002-vendor-the-pdf-parser.md), which is the point: that
-change bought 16.8× and was asserted to leave output byte-identical. Running
-this benchmark either side of it is the first independent check of that claim.
+anymd leads every aggregate metric, PDF included, which is new in 0.3.0.
 
 ### What the low scores actually are
 
@@ -232,7 +227,7 @@ works, and the scores above are what the fixes produced:
 | `hyperlink_02.html` | content 0.40 | link handling |
 
 The three PDF rows were one bug, not three. `pdfPageText` in `conv_pdf.go`
-ordered glyphs by `Y` descending then `X` ascending, which on a two-column page
+(removed in 0.3.0, superseded by the structure-aware renderer) ordered glyphs by `Y` descending then `X` ascending, which on a two-column page
 interleaved the columns line by line. **Fixed** — a recursive XY-cut took PDF
 order 0.70 to 0.77, past markitdown's 0.74, with content unchanged on all 15
 files. docling solves this without a model:
@@ -250,6 +245,46 @@ for elsewhere in this file.
 with no text layer, refused with `ErrNoTextLayer`. The vision-model path added
 in `cca96b3` handles it, but is opt-in and unconfigured here, which is why the
 refusal still stands.
+
+## PDF head to head (0.3.0)
+
+The 15 PDFs on their own, with v0.1.0 for comparison — this is the row the
+v0.1.0 write-up called anymd's largest remaining gap:
+
+| metric | anymd 0.3.0 | markitdown 0.1.5 | anymd v0.1.0 |
+|---|---:|---:|---:|
+| content | **0.94** | 0.90 | 0.87 |
+| order | **0.83** | 0.74 | 0.77 |
+| tables | **0.69** | 0.56 | 0.43 |
+| headings | **0.59** | 0.20 | 0.14 |
+| lists | **0.46** | 0.42 | 0.44 |
+
+Counted rather than scored, on `2206.01062.pdf`: anymd emits 30 headings and 68
+table rows, markitdown emits 0 and 0. markitdown's PDF path is pdfminer.six text
+extraction, so structure is not something it loses — it never had it.
+
+Speed, hyperfine, 8 runs after 2 warm-ups, CLI end to end, stdout discarded:
+
+| file | anymd | anymd `--no-images` | markitdown | speedup |
+|---|---:|---:|---:|---:|
+| normal_4pages.pdf | 33 ms | 26 ms | 679 ms | **21×** |
+| redp5110_sampled.pdf | 36 ms | 29 ms | 1063 ms | **30×** |
+| 2206.01062.pdf | 49 ms | 42 ms | 1532 ms | **31×** |
+
+Output size goes the other way, because figures are inlined by default:
+`2206.01062.pdf` is 960,241 bytes from anymd, 59,254 from markitdown, and
+43,355 from anymd with `--no-images`.
+
+Still losing: presentations exported to PDF. `odf_presentation_01.odp.pdf` and
+`odf_presentation_02.odp.pdf` score content 0.04 and 0.06 against markitdown's
+0.94 — the slide comes apart into single glyphs and the title is lost. v0.2.0
+behaves identically, so this is a long-standing bug rather than a 0.3.0
+regression, and it is what holds the `odf` row down.
+
+These numbers are unchanged by the vendored PDF parser of
+[ADR 0002](../docs/adr/0002-vendor-the-pdf-parser.md), which is the point: that
+change bought 16.8× and was asserted to leave output byte-identical. Running
+this benchmark either side of it is the first independent check of that claim.
 
 ## What this still does not measure
 

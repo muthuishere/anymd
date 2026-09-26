@@ -163,10 +163,28 @@ recursed, so a two-column page is read column by column instead of interleaved
 line by line. The fast path is conservative — when no column structure is found,
 a single-column page renders through the same code as before.
 
-**Not extracted:** tables (no PDF table detection — the largest known gap on the
-[quality benchmark](/anymd/benchmarks/#where-anymd-still-loses)), headings, form
-fields, and figures. The glyph count laid out per document is capped, so a
-crafted content stream cannot make layout unbounded.
+**Structure, recovered from the geometry:** headings (from the document outline
+where the bookmarks exist, from type size relative to the page's body size where
+they do not), bulleted and numbered lists, ruled *and* borderless tables as pipe
+tables, wrapped lines rejoined into paragraphs with hyphenation repaired against
+a witness list, and a running header or footer emitted once instead of on every
+page. Figures are extracted and inlined in reading order. On the 15 PDFs of the
+[quality benchmark](/anymd/benchmarks/#pdf-head-to-head) that is tables 0.69 and
+headings 0.59 against markitdown's 0.56 and 0.20.
+
+**Refused rather than guessed:** a font with no usable ToUnicode still draws
+glyphs in the right places, so extraction "succeeds" while every character is
+meaningless. The share of glyphs decoding to the replacement character, a
+private-use code point or a stray control code is measured per page: above 2% the
+page goes to the vision model when one is configured, and above 30% there is
+nothing worth keeping, so a document garbled on every page returns
+`ErrGarbledTextLayer`.
+
+**Not extracted:** form fields, and bold or italic runs. Presentations exported
+to PDF are a known bad case — see the
+[caution on the benchmark page](/anymd/benchmarks/#pdf-head-to-head). The glyph
+count laid out per document is capped, so a crafted content stream cannot make
+layout unbounded.
 
 **Errors, not empty output:** a PDF that parses cleanly but carries no text
 layer at all — the pure-scan document — returns the named `ErrNoTextLayer`, so a
@@ -363,8 +381,12 @@ The rest, in one list:
 
 - **Legacy `.xls` formula results are a placeholder**, a limit of the BIFF
   reader, and Excel's own date formats are not applied.
-- **PDF tables, headings, figures and form fields are not reconstructed** —
-  only the text layer is extracted, in column-aware reading order.
+- **PDF form fields, and bold/italic runs, are not reconstructed.** Headings,
+  lists, tables and figures are, as of 0.3.0. A presentation exported to PDF
+  still comes apart into single glyphs — the one PDF case where markitdown
+  currently does better.
+- **PDF page separation is a `---` rule, not a heading**, because a page number
+  is pagination, not document structure.
 - **HTML that requires JavaScript** renders as whatever is in the source.
 - **Encrypted zips and DRM'd EPUBs are refused.**
 - **`.msg` attachments, RTF-compressed bodies and recipient storages** are

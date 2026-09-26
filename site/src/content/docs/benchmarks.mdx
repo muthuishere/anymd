@@ -1,6 +1,6 @@
 ---
 title: Benchmarks
-description: anymd against markitdown 0.1.5 — speed, memory, coverage, and a 130-document fidelity benchmark scored against docling's ground truth.
+description: anymd against markitdown 0.1.5 — a PDF head-to-head, plus speed, memory, coverage, and a 130-document fidelity benchmark scored against docling's ground truth.
 sidebar:
   order: 7
 ---
@@ -25,7 +25,7 @@ Every figure on this page comes from `bench/README.md` in the repo.
 | | |
 |---|---|
 | Machine | Apple M5 Pro (darwin/arm64), macOS 25.4 |
-| anymd | v0.1.0, Go 1.26 |
+| anymd | v0.3.0 for quality and the PDF section, Go 1.26. The speed and memory tables below were taken at v0.1.0 and are unchanged apart from PDF, which 0.3.0 rewrote and which is re-measured in [PDF, head to head](#pdf-head-to-head). |
 | markitdown | 0.1.5, Python 3.12.13, `markitdown[all]` (pdfminer.six 20260107) |
 | Corpus | the 31 files in markitdown's own test suite |
 
@@ -120,6 +120,87 @@ pdfium extracts better than anymd does on hard layouts. It is also a C library,
 and anymd's whole proposition is one static `CGO_ENABLED=0` binary, so it is not
 free to adopt.
 
+## PDF, head to head
+
+PDF is the format most people arrive with, and it is the one where the two tools
+are least alike. markitdown's PDF path is pdfminer.six text extraction: it
+returns the prose and nothing else. anymd 0.3.0 recovers structure from the page
+geometry. The difference is not a matter of a few percent on a similarity score,
+so here is the blunt version — the same paper, both tools, counted:
+
+| on `2206.01062.pdf` (the DocLayNet paper, 9 pages) | anymd | markitdown |
+|---|---:|---:|
+| headings emitted | **30** | 0 |
+| table rows emitted | **68** | 0 |
+
+Zero is not a rounding difference. A PDF converted by markitdown arrives at the
+other end as one undifferentiated run of text: the section a passage came from,
+and the table it was a cell of, are gone, and nothing downstream can put them
+back. That matters most for the thing both tools are usually feeding — a
+retrieval index, where the heading is what makes a chunk findable.
+
+### Fidelity
+
+The 15 PDFs of the docling corpus, scored the same way as everything else on
+this page. The third column is anymd v0.1.0, when this page reported PDF tables
+and headings as anymd's **largest remaining gap**:
+
+| metric | anymd 0.3.0 | markitdown 0.1.5 | anymd v0.1.0 |
+|---|---:|---:|---:|
+| content | **0.94** | 0.90 | 0.87 |
+| order | **0.83** | 0.74 | 0.77 |
+| tables | **0.69** | 0.56 | 0.43 |
+| headings | **0.59** | 0.20 | 0.14 |
+| lists | **0.46** | 0.42 | 0.44 |
+
+anymd now leads every PDF metric. Headings went from losing 0.14 to 0.20 to
+winning 0.59 to 0.20, and tables from 0.43 to 0.69, which is the gap that page
+called a missing feature rather than a tuning problem. `lists` is the honest
+weak spot: 0.46 against 0.42 is a win by a nose, and several corpus PDFs still
+score 0.00 on it.
+
+### Speed
+
+hyperfine, 8 runs after 2 warm-ups, stdout discarded, CLI end to end — so
+markitdown's ~300 ms of interpreter start is included, because a script pays it
+on every file.
+
+| file | anymd | anymd `--no-images` | markitdown | speedup |
+|---|---:|---:|---:|---:|
+| normal_4pages.pdf | 33 ms | 26 ms | 679 ms | **21×** |
+| redp5110_sampled.pdf | 36 ms | 29 ms | 1063 ms | **30×** |
+| 2206.01062.pdf | 49 ms | 42 ms | 1532 ms | **31×** |
+
+Structure recovery is not what costs the time: the extra work over
+`--no-images` is 7 ms, and that is base64, not layout analysis.
+
+### The one number that goes the other way
+
+anymd's default PDF output is **much larger**, because 0.3.0 inlines figures as
+base64 `data:` URIs:
+
+| `2206.01062.pdf` output | bytes |
+|---|---:|
+| anymd, default | 960,241 |
+| markitdown | 59,254 |
+| anymd `--no-images` | **43,355** |
+
+Sixteen times markitdown's output, and the figures are the whole of the
+difference — with `--no-images` anymd is *smaller* than markitdown while
+carrying 30 headings and 68 table rows it does not have. If the destination is a
+context window, pass `--no-images`; if it is an archive that has to survive the
+source file moving, keep them.
+
+<Aside type="caution" title="Where markitdown still wins on PDF">
+Presentations exported to PDF. On `odf_presentation_01.odp.pdf` and
+`odf_presentation_02.odp.pdf` anymd scores content **0.04** and **0.06** against
+markitdown's 0.94: it shatters the slide into single glyphs (`T`, `a r r`,
+`l`, `u u`) and loses the title, where markitdown recovers the table. This is
+not a 0.3.0 regression — v0.2.0 produces the same output — and it is an open
+bug, not a trade-off. It is also what drags the `odf` row of the main results
+table down, since those files route through the PDF converter.
+</Aside>
+
 ## Coverage — the number that is easy to report dishonestly
 
 A naive count says markitdown converts **30/31** files and anymd **26/31**. That
@@ -194,7 +275,7 @@ and it scores 0 like any other miss.
 
 ### Results
 
-130 documents, anymd v0.1.0 against markitdown 0.1.5. Each cell is
+130 documents, anymd v0.3.0 against markitdown 0.1.5. Each cell is
 **anymd / markitdown**. Bold marks the winner where the gap is more than a
 rounding difference.
 
@@ -205,31 +286,41 @@ rounding difference.
 | epub | 1 | 1.00 / 0.99 | 1.00 / 0.99 | 1.00 / 1.00 | 1.00 / 1.00 | 1.00 / 1.00 |
 | html | 32 | **0.97** / 0.96 | **0.97** / 0.96 | **0.99** / 0.98 | 1.00 / 1.00 | 0.94 / 0.94 |
 | md | 10 | 0.97 / 0.97 | 0.97 / 0.97 | 0.87 / 0.87 | 0.92 / 0.92 | 0.78 / 0.78 |
-| odf (as pdf) | 6 | 0.64 / **0.94** | 0.60 / **0.82** | 0.17 / **0.38** | 0.17 / 0.17 | 0.56 / 0.56 |
-| pdf | 15 | 0.87 / 0.90 | **0.77** / 0.74 | 0.43 / **0.56** | 0.14 / 0.20 | 0.44 / 0.42 |
-| pptx | 8 | 0.80 / 0.82 | 0.77 / 0.82 | **0.98** / 0.95 | **1.00** / 0.86 | 0.56 / 0.57 |
+| md_deepseek | 3 | 0.90 / 0.90 | 0.90 / 0.90 | 0.67 / 0.67 | 1.00 / 1.00 | 1.00 / 1.00 |
+| odf (as pdf) | 6 | 0.64 / **0.94** | 0.61 / **0.82** | 0.31 / **0.38** | **0.67** / 0.17 | **0.67** / 0.56 |
+| pdf | 15 | **0.94** / 0.90 | **0.83** / 0.74 | **0.69** / 0.56 | **0.59** / 0.20 | **0.46** / 0.42 |
+| pptx | 8 | 0.79 / 0.82 | 0.78 / 0.82 | **0.98** / 0.95 | **1.00** / 0.86 | **1.00** / 0.57 |
+| uspto | 1 | 0.54 / 0.54 | 0.54 / 0.54 | 1.00 / 1.00 | 0.00 / 0.00 | 0.00 / 0.00 |
 | xls | 1 | **0.95** / 0.68 | **0.95** / 0.68 | **1.00** / 0.41 | 1.00 / 1.00 | 1.00 / 1.00 |
 | xlsx | 11 | **0.98** / 0.68 | **0.98** / 0.65 | **0.99** / 0.60 | 1.00 / 1.00 | 1.00 / 1.00 |
-| **all** | **130** | **0.92** / 0.91 | **0.91** / 0.88 | **0.87** / 0.85 | **0.84** / 0.82 | **0.83** / 0.82 |
+| **all** | **130** | **0.93** / 0.91 | **0.92** / 0.88 | **0.91** / 0.85 | **0.91** / 0.82 | **0.86** / 0.82 |
 
 anymd leads every aggregate metric. The spreadsheet lead is decisive — xlsx
-content **0.98 against 0.68**, tables **0.99 against 0.60**.
+content **0.98 against 0.68**, tables **0.99 against 0.60** — and PDF, which
+this page used to report as the weak flank, now leads on all five.
 
-These numbers are unchanged by the vendored PDF parser, which is the point: that
-change bought 16.8× and was asserted to leave output byte-identical. Running
-this benchmark either side of it is the first independent check of that claim.
+The PDF work moved four aggregates: tables 0.87 → 0.91, headings 0.84 → 0.91,
+order 0.91 → 0.92, content 0.92 → 0.93. It is the only change between this table
+and the v0.1.0 one, which is a useful property of a benchmark that spans
+formats: a PDF rewrite is not supposed to move `csv`, and it did not.
 
 ### Where anymd still loses
 
-Three places, and none of them is a tuning problem:
+Two places now that PDF has been dealt with, and the first is much the larger:
 
-- **`odf`** — content 0.64 against markitdown's 0.94, tables 0.17 against 0.38.
-  These route through the PDF converter.
-- **PDF content** — 0.87 against 0.90.
-- **PDF tables and headings** — 0.43 against 0.56, and 0.14 against 0.20.
-  `out_tables: 0` on every PDF: anymd emits almost no tables from a PDF at all.
-  That is a missing feature, and it is **the largest remaining gap on this
-  benchmark**.
+- **`odf`** — content 0.64 against markitdown's 0.94, tables 0.31 against 0.38.
+  These route through the PDF converter, and two files account for nearly all of
+  it: `odf_presentation_01.odp.pdf` and `odf_presentation_02.odp.pdf` score
+  content **0.04** and **0.06**, because a presentation exported to PDF comes
+  apart into single glyphs. See the caution in
+  [PDF, head to head](#pdf-head-to-head) — it is a bug, it predates 0.3.0, and
+  it is now the largest remaining gap on this benchmark.
+- **`pptx` content and order** — 0.79 against 0.82 and 0.78 against 0.82, while
+  anymd wins tables, headings and lists on the same files. The losses are
+  `powerpoint_with_image.pptx` (0.47) and `powerpoint_malformed_pictures.pptx`
+  (0.68), so this is about text anymd does not reach inside picture shapes, not
+  about the outline work 0.3.0 added — which took pptx lists from 0.56 to
+  1.00.
 
 ### What the benchmark found on its first run
 

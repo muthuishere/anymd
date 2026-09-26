@@ -73,14 +73,20 @@ $ head -4 report.md
 		<span class="am-stat-label">one binary, against a 318 MB venv</span>
 	</li>
 	<li>
-		<span class="am-stat-value">0.92</span>
+		<span class="am-stat-value">0.93</span>
 		<span class="am-stat-label">content fidelity over 130 docling documents, against 0.91</span>
+	</li>
+	<li>
+		<span class="am-stat-value">30 vs 0</span>
+		<span class="am-stat-label">headings recovered from a 9-page PDF paper &mdash; markitdown emits none</span>
 	</li>
 </ul>
 
 anymd converts **16 file formats** to Markdown — documents, spreadsheets, email, archives — and can crawl a site into a Markdown mirror with its links rewritten to the local files. It is a Go library first, with a CLI wrapper and an installable agent skill.
 
 Against Microsoft's [markitdown](https://github.com/microsoft/markitdown) it is **9–31× faster in-process** depending on format, ships as a **15 MB binary** instead of a 318 MB virtualenv, and scores **higher on document fidelity** across docling's 130-document corpus. Model-backed OCR, image captioning and audio transcription are available but **off by default**, so a default build makes no network call at all.
+
+The widest gap is **PDF**. markitdown's PDF path is pdfminer text extraction, so a converted PDF arrives as one undifferentiated run of prose; anymd recovers headings, lists, tables and figures from the page geometry, and refuses a document whose fonts decode to nonsense instead of returning fluent rubbish. On the same 9-page paper anymd emits 30 headings and 68 table rows where markitdown emits none of either, at 31× the speed. The [benchmarks page](/anymd/benchmarks/#pdf-head-to-head) has the per-metric numbers, the reproduction commands, and the one PDF case where markitdown still wins.
 
 Feed it a file, get clean GitHub-flavored Markdown — for an LLM context window, a diff,
 or a docs pipeline. `anymd` is a Go-native alternative to Microsoft's
